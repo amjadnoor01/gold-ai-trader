@@ -1,49 +1,56 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# Distribution / packaging
 .Python
-*.egg-info/
-dist/
 build/
+dist/
+*.egg-info/
 
-# Virtual Environment
-bin/
-lib/
-lib64/
-include/
-share/
-pyvenv.cfg
+# Virtual environments
+venv/
+.venv/
+env/bin/
+env/lib/
 
-# Data files (exclude large datasets)
-*.csv
-data/*.json
-!data/.gitkeep
+# Environment secrets
+.env
+*.env.local
 
-# Model checkpoints - keep structure but exclude large files
+# Model files (large — store separately)
 *.zip
-*.tar.gz
-train/ppo_*.zip
-train/dreamer*/
-train/dreamer_ultimate/
+*.pt
+*.pth
+*.ckpt
+train/*.zip
+train/*.pt
+
+# Data files (large)
+data/*.csv
+data/*.parquet
+data/*.feather
 
 # Logs
+logs/
 *.log
-training.log
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
-*.swo
-*~
 
-# OS
-.DS_Store
-Thumbs.db
+# Jupyter
+.ipynb_checkpoints/
 
-# Secrets
-.env
-*.key
-credentials.json
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage

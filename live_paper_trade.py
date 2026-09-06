@@ -1,0 +1,278 @@
+"""
+live_paper_trade.py — Paper trading runner (replaces live_trade_mt5.py).
+
+Uses:
+  - yfinance for free live XAUUSD price ticks (no API key)
+  - Pretrained PPO model from stable-baselines3
+  - PaperBroker for virtual order execution with SL/TP
+  - ClosedLoopLearner to self-improve from each closed trade
+
+Run:
+    python live_paper_trade.py
+
+Press Ctrl+C to stop cleanly.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import signal
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+
+# ── Project imports ──────────────────────────────────────────────────────────
+from live_feed import LiveGoldFeed, fetch_ohlcv
+from paper_broker import PaperBroker
+from features.make_features import compute_features
+from learner import ClosedLoopLearner
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("logs/paper_trade.log", mode="a"),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+# ── Config ───────────────────────────────────────────────────────────────────
+load_dotenv()
+INITIAL_BALANCE  = float(os.getenv("INITIAL_BALANCE", "10000"))
+RISK_PCT         = float(os.getenv("RISK_PER_TRADE_PCT", "0.015"))
+MAX_DD_PCT       = float(os.getenv("MAX_DAILY_DRAWDOWN_PCT", "0.03"))
+MODEL_PATH       = os.getenv("MODEL_PATH", "train/ppo_xauusd_latest.zip")
+WINDOW           = 64
+SYMBOL           = "XAUUSD"
+POLL_INTERVAL    = float(os.getenv("LIVE_POLL_SECONDS", "10"))
+STATE_FILE       = Path("logs/paper_state.json")
+STATE_FILE.parent.mkdir(exist_ok=True)
+
+
+class PaperTradingBot:
+    def __init__(self):
+        self.broker  = PaperBroker(initial_balance=INITIAL_BALANCE)
+        self.learner = ClosedLoopLearner()
+        self.feed    = LiveGoldFeed(poll_interval=POLL_INTERVAL)
+        self.model   = self._load_model()
+
+        # Rolling bar buffer for feature computation (up to 500 bars)
+        self.bar_buffer: pd.DataFrame = pd.DataFrame()
+        self._load_history()
+
+        self.is_active      = True
+        self.tick_count     = 0
+        self.last_action    = 0    # 0=Flat, 1=Long, 2=Short
+        self.circuit_tripped = False
+
+        self.feed.register_callback(self._on_tick)
+
+    # ── Startup ──────────────────────────────────────────────────────────────
+    def _load_model(self):
+        mp = Path(MODEL_PATH)
+        if not mp.exists():
+            logger.warning(f"[Bot] No model at {mp} — running RANDOM policy")
+            return None
+        try:
+            from stable_baselines3 import PPO
+            model = PPO.load(str(mp))
+            logger.info(f"[Bot] ✅ Model loaded: {mp}")
+            return model
+        except Exception as e:
+            logger.error(f"[Bot] Model load failed: {e} — running RANDOM policy")
+            return None
+
+    def _load_history(self):
+        """Pre-load historical bars so we have enough data for features."""
+        try:
+            logger.info("[Bot] Downloading historical OHLCV for feature warmup…")
+            df = fetch_ohlcv("GC=F", period="3mo", interval="1h")
+            self.bar_buffer = df.tail(500).copy()
+            logger.info(f"[Bot] History loaded: {len(self.bar_buffer)} bars "
+                        f"({self.bar_buffer['time'].iloc[0]} → {self.bar_buffer['time'].iloc[-1]})")
+        except Exception as e:
+            logger.error(f"[Bot] History load failed: {e}")
+
+    # ── Tick handler ─────────────────────────────────────────────────────────
+    async def _on_tick(self, tick: dict):
+        if not self.is_active:
+            return
+
+        price = tick["last"]
+        self.tick_count += 1
+
+        # 1. SL / TP check & closed-trade feedback
+        closed = self.broker.update_price(price)
+        for trade in closed:
+            learned = self.learner.on_trade_closed(trade)
+            logger.info(f"[Learn] Trade {trade['trade_id']} closed  "
+                        f"PnL={trade['realized_pnl']:+.2f}  "
+                        f"new_weights={learned}")
+
+        # 2. Circuit-breaker: max daily drawdown
+        dd = (self.broker.daily_loss_start - self.broker.equity) / self.broker.daily_loss_start
+        if dd > MAX_DD_PCT:
+            if not self.circuit_tripped:
+                logger.warning(f"[CIRCUIT] Daily drawdown {dd:.1%} > {MAX_DD_PCT:.1%} — flattening all")
+                self.broker.close_all(price, "CIRCUIT_BREAKER")
+                self.circuit_tripped = True
+            self._save_state(price)
+            return
+
+        # 3. Update bar buffer with synthetic tick-level bar
+        self._update_bar_buffer(tick)
+
+        # 4. Generate AI signal (every tick)
+        action = self._predict_action(price)
+
+        # 5. Execute if signal changed
+        if len(self.broker.positions) == 0 and action != 0:
+            self._enter_position(action, price)
+        elif len(self.broker.positions) > 0 and action == 0:
+            for tid in list(self.broker.positions):
+                self.broker.close_position(tid, price, "MODEL_EXIT")
+
+        # 6. Persist state
+        self._save_state(price)
+
+        # Log every ~30 ticks
+        if self.tick_count % 30 == 0:
+            s = self.broker.summary()
+            logger.info(f"[Status] equity={s['equity']:.2f}  "
+                        f"realized={s['realized_pnl']:+.2f}  "
+                        f"open={s['open_positions']}  "
+                        f"ticks={self.tick_count}")
+
+    # ── Feature → Action ─────────────────────────────────────────────────────
+    def _update_bar_buffer(self, tick: dict):
+        """Append a synthetic 1-tick bar to the buffer."""
+        price = tick["last"]
+        now   = pd.Timestamp.utcnow().tz_localize(None)
+        row   = pd.DataFrame([{
+            "time": now, "open": price, "high": price,
+            "low": price, "close": price, "volume": 1.0
+        }])
+        self.bar_buffer = pd.concat([self.bar_buffer, row], ignore_index=True).tail(500)
+
+    def _predict_action(self, price: float) -> int:
+        """Return 0=Flat, 1=Long, 2=Short."""
+        if self.model is None or len(self.bar_buffer) < WINDOW + 50:
+            # Not enough data — random exploration
+            return int(np.random.choice([0, 1], p=[0.6, 0.4]))
+
+        try:
+            _, feats, _ = compute_features(self.bar_buffer.copy())
+            if feats is None or len(feats) < WINDOW:
+                return 0
+
+            obs_features = feats[-WINDOW:].astype(np.float32)
+            current_pos  = 1 if len(self.broker.positions) > 0 else 0
+            obs = np.concatenate([obs_features.reshape(-1),
+                                  np.array([current_pos], dtype=np.float32)])
+
+            action, _ = self.model.predict(obs, deterministic=True)
+            return int(action)
+        except Exception as e:
+            logger.debug(f"[Bot] Predict error: {e}")
+            return 0
+
+    # ── Position sizing & entry ───────────────────────────────────────────────
+    def _enter_position(self, action: int, price: float):
+        direction = "BUY" if action == 1 else "SELL"
+
+        # ATR-based SL/TP from last 14 bars
+        atr = self._calc_atr(14)
+        sl_dist = max(atr * 1.5, 3.0)
+        tp_dist = sl_dist * 2.0
+
+        sl = price - sl_dist if direction == "BUY" else price + sl_dist
+        tp = price + tp_dist if direction == "BUY" else price - tp_dist
+
+        # Kelly-ish position sizing: risk RISK_PCT of equity
+        risk_dollars = self.broker.equity * RISK_PCT
+        size         = round(risk_dollars / (sl_dist * 100), 2)   # in oz
+        size         = max(0.01, min(size, 5.0))                   # clamp
+
+        pos = self.broker.open_position(
+            symbol=SYMBOL, direction=direction,
+            price=price, size=size, sl=sl, tp=tp,
+            confidence=0.75, regime="DRL_PPO"
+        )
+        if pos:
+            self.last_action = action
+
+    def _calc_atr(self, period: int = 14) -> float:
+        df = self.bar_buffer.tail(period + 1)
+        if len(df) < 2:
+            return 5.0
+        highs  = df["high"].values
+        lows   = df["low"].values
+        closes = df["close"].values
+        trs = [highs[0] - lows[0]]
+        for i in range(1, len(df)):
+            trs.append(max(highs[i] - lows[i],
+                           abs(highs[i] - closes[i-1]),
+                           abs(lows[i]  - closes[i-1])))
+        return float(np.mean(trs[-period:]))
+
+    # ── State persistence ────────────────────────────────────────────────────
+    def _save_state(self, price: float):
+        s = self.broker.summary()
+        state = {
+            "timestamp":   datetime.utcnow().isoformat(),
+            "spot_price":  round(price, 2),
+            "is_active":   self.is_active,
+            "circuit_breaker": self.circuit_tripped,
+            "account":     s,
+            "positions":   [p.to_dict() for p in self.broker.positions.values()],
+            "recent_trades": self.broker.closed_trades[-20:],
+            "learner_iterations": self.learner.iterations,
+            "learner_weights":    self.learner.weights,
+            "tick_count":  self.tick_count,
+        }
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        tmp.replace(STATE_FILE)
+
+    # ── Main run loop ────────────────────────────────────────────────────────
+    async def run(self):
+        logger.info("=" * 60)
+        logger.info("   Gold AI Paper Trading Bot — DRL Edition")
+        logger.info(f"   Balance: ${INITIAL_BALANCE:,.2f}  Risk/trade: {RISK_PCT:.1%}")
+        logger.info(f"   Poll interval: {POLL_INTERVAL}s")
+        logger.info("=" * 60)
+        await self.feed.start()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+def main():
+    bot = PaperTradingBot()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def _shutdown(sig, frame):
+        logger.info(f"\n[Bot] Caught {signal.Signals(sig).name} — shutting down cleanly")
+        bot.feed.stop()
+        loop.stop()
+
+    signal.signal(signal.SIGINT,  _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    try:
+        loop.run_until_complete(bot.run())
+    finally:
+        loop.close()
+        logger.info("[Bot] Stopped.")
+
+
+if __name__ == "__main__":
+    main()
