@@ -105,11 +105,15 @@ class PaperTradingBot:
 
     # ── Tick handler ─────────────────────────────────────────────────────────
     async def _on_tick(self, tick: dict):
-        if not self.is_active:
-            return
-
         price = tick["last"]
         self.tick_count += 1
+
+        # 0. Process dashboard control commands
+        self._process_command_queue(price)
+
+        if not self.is_active:
+            self._save_state(price)
+            return
 
         # 1. SL / TP check & closed-trade feedback
         closed = self.broker.update_price(price)
@@ -152,6 +156,34 @@ class PaperTradingBot:
                         f"realized={s['realized_pnl']:+.2f}  "
                         f"open={s['open_positions']}  "
                         f"ticks={self.tick_count}")
+
+    # ── Command Queue Handling ───────────────────────────────────────────────
+    def _process_command_queue(self, price: float):
+        cmd_file = Path("data/command_queue.json")
+        if not cmd_file.exists():
+            return
+        try:
+            cmds = json.loads(cmd_file.read_text())
+            if not isinstance(cmds, list):
+                cmds = [cmds]
+            cmd_file.unlink(missing_ok=True)
+            for c in cmds:
+                cmd = c.get("command")
+                if cmd == "toggle_active":
+                    self.is_active = not self.is_active
+                    logger.info(f"[Command] Bot state toggled -> Active={self.is_active}")
+                elif cmd == "manual_trade":
+                    dir_name = c.get("direction", "BUY")
+                    act = 1 if dir_name == "BUY" else 2
+                    self._enter_position(act, price)
+                    logger.info(f"[Command] Manual trade executed -> {dir_name} @ ${price:.2f}")
+                elif cmd == "force_eval":
+                    from autopilot import Autopilot
+                    ap = Autopilot()
+                    ap.evaluate(self.broker.closed_trades, self.broker.summary())
+                    logger.info("[Command] Forced Autopilot evaluation completed")
+        except Exception as e:
+            logger.error(f"[Command] Error processing command queue: {e}")
 
     # ── Feature → Action ─────────────────────────────────────────────────────
     def _update_bar_buffer(self, tick: dict):
