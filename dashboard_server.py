@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Set
 
@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from autopilot import Autopilot
+from knowledge_db import KnowledgeDatabase
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -34,6 +35,7 @@ PERF_LOG     = Path("logs/performance_log.json")
 
 app = FastAPI(title="Gold AI Trader Dashboard")
 autopilot = Autopilot()
+db = KnowledgeDatabase()
 
 # ── Connected WebSocket clients ───────────────────────────────────────────────
 clients: Set[WebSocket] = set()
@@ -71,7 +73,7 @@ def _build_payload() -> dict:
     ]
 
     return {
-        "ts":              datetime.utcnow().isoformat(),
+        "ts":              datetime.now(timezone.utc).isoformat(),
         "spot_price":      state.get("spot_price", 0),
         "is_active":       state.get("is_active", False),
         "circuit_breaker": state.get("circuit_breaker", False),
@@ -89,6 +91,8 @@ def _build_payload() -> dict:
         "ap_status":       ap_snap.get("status", {}),
         "equity_curve":    equity_curve,
         "perf_history":    perf_h[-10:],
+        "knowledge_summary": db.get_knowledge_summary(),
+        "poc_history":       db.get_poc_history(limit=10),
     }
 
 

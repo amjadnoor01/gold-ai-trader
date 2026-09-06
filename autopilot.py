@@ -24,6 +24,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from knowledge_db import KnowledgeDatabase
+
 logger = logging.getLogger(__name__)
 
 # ── File paths ────────────────────────────────────────────────────────────────
@@ -89,6 +91,7 @@ class Autopilot:
 
     def __init__(self):
         self.targets = {k: PerformanceTarget(k, v) for k, v in DEFAULT_TARGETS.items()}
+        self.db      = KnowledgeDatabase()
         self._last_eval_count = 0
         self._perf_history: List[dict] = self._load_perf_history()
 
@@ -109,7 +112,7 @@ class Autopilot:
         directive = self._generate_directive(metrics, scores)
 
         report = {
-            "timestamp":  datetime.utcnow().isoformat(),
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
             "trade_count": n,
             "metrics":    metrics,
             "scores":     scores,
@@ -117,6 +120,10 @@ class Autopilot:
             "directive":  directive,
             "status": {k: self.targets[k].status(metrics[k]) for k in self.targets},
         }
+
+        # Log POC milestone audit to SQLite DB
+        weights_snap = directive.get("active_weights", {})
+        self.db.record_poc_milestone(account, metrics, weights_snap, f"POC Audit Cycle #{n}")
 
         self._perf_history.append(report)
         self._save(report)

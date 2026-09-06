@@ -32,6 +32,7 @@ from live_feed import LiveGoldFeed, fetch_ohlcv
 from paper_broker import PaperBroker
 from features.make_features import compute_features
 from learner import ClosedLoopLearner
+from knowledge_db import KnowledgeDatabase
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -61,6 +62,7 @@ class PaperTradingBot:
     def __init__(self):
         self.broker  = PaperBroker(initial_balance=INITIAL_BALANCE)
         self.learner = ClosedLoopLearner()
+        self.db      = KnowledgeDatabase()
         self.feed    = LiveGoldFeed(poll_interval=POLL_INTERVAL)
         self.model   = self._load_model()
 
@@ -113,9 +115,9 @@ class PaperTradingBot:
         closed = self.broker.update_price(price)
         for trade in closed:
             learned = self.learner.on_trade_closed(trade)
-            logger.info(f"[Learn] Trade {trade['trade_id']} closed  "
-                        f"PnL={trade['realized_pnl']:+.2f}  "
-                        f"new_weights={learned}")
+            atr = self._calc_atr(14)
+            lessons = self.db.log_trade_closed(trade, {"atr": atr, "rsi": 50.0})
+            logger.info(f"[Learn+DB] Trade {trade['trade_id']} closed | PnL={trade['realized_pnl']:+.2f} | Lessons: {lessons}")
 
         # 2. Circuit-breaker: max daily drawdown
         dd = (self.broker.daily_loss_start - self.broker.equity) / self.broker.daily_loss_start
@@ -211,21 +213,30 @@ class PaperTradingBot:
         sl_dist = max(atr * sl_mult, 3.0)
         tp_dist = max(atr * tp_mult, sl_dist * 1.5)
 
+        # Knowledge Base Pattern Intelligence Filter
+        db_mod, rationale = self.db.query_setup_intelligence({"direction": direction, "atr": atr, "rsi": 50.0})
+        logger.info(f"[KnowledgeBase] {rationale} (size multiplier: {db_mod:.2f}x)")
+
+        if db_mod < 0.65:
+            logger.warning(f"[KnowledgeBase] Trade skipped due to low historical pattern confidence ({rationale})")
+            return
+
         sl = price - sl_dist if direction == "BUY" else price + sl_dist
         tp = price + tp_dist if direction == "BUY" else price - tp_dist
 
-        # Kelly-ish position sizing: risk risk_pct of equity
-        risk_dollars = self.broker.equity * risk_pct
+        # Kelly-ish position sizing scaled by Knowledge Base intelligence multiplier
+        risk_dollars = self.broker.equity * risk_pct * db_mod
         size         = round(risk_dollars / (sl_dist * 100), 2)   # in oz
         size         = max(0.01, min(size, 5.0))                   # clamp
 
         pos = self.broker.open_position(
             symbol=SYMBOL, direction=direction,
             price=price, size=size, sl=sl, tp=tp,
-            confidence=0.75, regime="DRL_PPO"
+            confidence=0.75 * db_mod, regime="DRL_PPO"
         )
         if pos:
             self.last_action = action
+            self.db.log_trade_opened(pos, {"atr": atr, "rsi": 50.0, "db_mod": db_mod})
 
     def _calc_atr(self, period: int = 14) -> float:
         df = self.bar_buffer.tail(period + 1)
