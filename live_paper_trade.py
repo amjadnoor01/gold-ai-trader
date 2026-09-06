@@ -219,7 +219,7 @@ class PaperTradingBot:
             return 0
 
     # ── Position sizing & entry ───────────────────────────────────────────────
-    def _read_tune_directive() -> dict:
+    def _read_tune_directive(self) -> dict:
         tune_file = Path("logs/tune_directive.json")
         if tune_file.exists():
             try:
