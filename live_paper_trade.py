@@ -20,7 +20,7 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -155,7 +155,7 @@ class PaperTradingBot:
     def _update_bar_buffer(self, tick: dict):
         """Append a synthetic 1-tick bar to the buffer."""
         price = tick["last"]
-        now   = pd.Timestamp.utcnow().tz_localize(None)
+        now   = pd.Timestamp.now('UTC').tz_localize(None)
         row   = pd.DataFrame([{
             "time": now, "open": price, "high": price,
             "low": price, "close": price, "volume": 1.0
@@ -185,19 +185,37 @@ class PaperTradingBot:
             return 0
 
     # ── Position sizing & entry ───────────────────────────────────────────────
+    def _read_tune_directive() -> dict:
+        tune_file = Path("logs/tune_directive.json")
+        if tune_file.exists():
+            try:
+                return json.loads(tune_file.read_text())
+            except Exception:
+                pass
+        return {}
+
     def _enter_position(self, action: int, price: float):
         direction = "BUY" if action == 1 else "SELL"
+        directive = self._read_tune_directive()
+
+        risk_pct    = float(directive.get("risk_pct", RISK_PCT))
+        sl_mult     = float(directive.get("sl_atr_mult", 1.5))
+        tp_mult     = float(directive.get("tp_atr_mult", 3.0))
+        max_pos     = int(directive.get("max_positions", 1))
+
+        if len(self.broker.positions) >= max_pos:
+            return
 
         # ATR-based SL/TP from last 14 bars
         atr = self._calc_atr(14)
-        sl_dist = max(atr * 1.5, 3.0)
-        tp_dist = sl_dist * 2.0
+        sl_dist = max(atr * sl_mult, 3.0)
+        tp_dist = max(atr * tp_mult, sl_dist * 1.5)
 
         sl = price - sl_dist if direction == "BUY" else price + sl_dist
         tp = price + tp_dist if direction == "BUY" else price - tp_dist
 
-        # Kelly-ish position sizing: risk RISK_PCT of equity
-        risk_dollars = self.broker.equity * RISK_PCT
+        # Kelly-ish position sizing: risk risk_pct of equity
+        risk_dollars = self.broker.equity * risk_pct
         size         = round(risk_dollars / (sl_dist * 100), 2)   # in oz
         size         = max(0.01, min(size, 5.0))                   # clamp
 
@@ -227,7 +245,7 @@ class PaperTradingBot:
     def _save_state(self, price: float):
         s = self.broker.summary()
         state = {
-            "timestamp":   datetime.utcnow().isoformat(),
+            "timestamp":   datetime.now(timezone.utc).isoformat(),
             "spot_price":  round(price, 2),
             "is_active":   self.is_active,
             "circuit_breaker": self.circuit_tripped,

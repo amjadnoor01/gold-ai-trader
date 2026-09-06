@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class Position:
         self.tp          = tp
         self.confidence  = confidence
         self.regime      = regime
-        self.entry_time  = datetime.utcnow().isoformat()
+        self.entry_time  = datetime.now(timezone.utc).isoformat()
         self.current_price = entry_price
         self.unrealized_pnl = 0.0
         self.status      = "OPEN"
@@ -155,7 +155,7 @@ class PaperBroker:
         trade = {
             **pos.to_dict(),
             "exit_price":   round(exit_price, 2),
-            "exit_time":    datetime.utcnow().isoformat(),
+            "exit_time":    datetime.now(timezone.utc).isoformat(),
             "realized_pnl": round(net, 4),
             "exit_reason":  reason,
             "status":       "CLOSED",

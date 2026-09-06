@@ -67,7 +67,7 @@ class LiveGoldFeed:
                     tick = {
                         "symbol":    "XAUUSD",
                         "last":      float(price),
-                        "timestamp": pd.Timestamp.utcnow().isoformat(),
+                        "timestamp": pd.Timestamp.now('UTC').isoformat(),
                         "source":    ticker,
                     }
                     return tick
