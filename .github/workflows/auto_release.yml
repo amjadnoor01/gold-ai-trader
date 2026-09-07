@@ -1,0 +1,29 @@
+name: Automated Release & Binary Publisher
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish-release:
+    name: Publish Production Binary Release
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          MQL5/Experts/AiBridgeEA.mq5
+          MQL5/Experts/AiBridgeEA.ex5
+          mt5_brain_service.py
+          mt5_autonomy_loop.py
+          requirements.txt
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
