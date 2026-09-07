@@ -600,6 +600,24 @@ void RenderOnChartHUD()
    lines[6] = StringFormat("⚡ ENSEMBLE SCORE:      %+.1f%%", m_total_ensemble_score);
    lines[7] = StringFormat("🛡️ Account Free Margin:  $%.2f", AccountInfoDouble(ACCOUNT_MARGIN_FREE));
 
+   // Framed background panel
+   string bg_name = "ENSEMBLE_HUD_BG";
+   if(ObjectFind(0, bg_name) < 0)
+   {
+      ObjectCreate(0, bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bg_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, bg_name, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, bg_name, OBJPROP_YDISTANCE, 15);
+      ObjectSetInteger(0, bg_name, OBJPROP_XSIZE, 380);
+      ObjectSetInteger(0, bg_name, OBJPROP_YSIZE, 175);
+      ObjectSetInteger(0, bg_name, OBJPROP_BGCOLOR, clrBlack);
+      ObjectSetInteger(0, bg_name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bg_name, OBJPROP_COLOR, clrGold);
+      ObjectSetInteger(0, bg_name, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, bg_name, OBJPROP_BACK, false);
+      ObjectSetInteger(0, bg_name, OBJPROP_SELECTABLE, false);
+   }
+
    for(int i = 0; i < 8; i++)
    {
       string obj_name = "ENSEMBLE_HUD_L" + IntegerToString(i);

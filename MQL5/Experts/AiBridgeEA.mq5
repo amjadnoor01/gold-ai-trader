@@ -679,7 +679,7 @@ void CreateHUDCanvas()
    ObjectSetInteger(0, "HUD_BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_XDISTANCE, 15);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_YDISTANCE, 25);
-   ObjectSetInteger(0, "HUD_BG", OBJPROP_XSIZE, 340);
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_XSIZE, 360);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_YSIZE, 220);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_BGCOLOR, clrBlack);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
@@ -691,19 +691,19 @@ void CreateHUDCanvas()
    CreateHUDLabel("HUD_TITLE", "⚡ ANTIGRAVITY AI BRAIN 3.0 (ENSEMBLE)", 25, 33, clrYellow, 10, true);
 
    CreateHUDLabel("HUD_SESSION_L", "Market Session:", 25, 55, clrSilver, 9, false);
-   CreateHUDLabel("HUD_SESSION_V", "LONDON / NY", 155, 55, clrWhite, 9, true);
+   CreateHUDLabel("HUD_SESSION_V", "LONDON / NY", 175, 55, clrWhite, 9, true);
 
    CreateHUDLabel("HUD_STRENGTH_L", "AI Strength Score:", 25, 75, clrSilver, 9, false);
-   CreateHUDLabel("HUD_STRENGTH_V", "+0.0 (NEUTRAL)", 155, 75, clrGold, 9, true);
+   CreateHUDLabel("HUD_STRENGTH_V", "+0.0 (NEUTRAL)", 175, 75, clrGold, 9, true);
 
    CreateHUDLabel("HUD_CLUSTER_L", "Active Cluster:", 25, 95, clrSilver, 9, false);
-   CreateHUDLabel("HUD_CLUSTER_V", "NONE (0 positions)", 155, 95, clrWhite, 9, true);
+   CreateHUDLabel("HUD_CLUSTER_V", "NONE (0 positions)", 175, 95, clrWhite, 9, true);
 
    CreateHUDLabel("HUD_PNL_L", "Cluster Floating PnL:", 25, 115, clrSilver, 9, false);
-   CreateHUDLabel("HUD_PNL_V", "$0.00", 155, 115, clrLime, 9, true);
+   CreateHUDLabel("HUD_PNL_V", "$0.00", 175, 115, clrLime, 9, true);
 
    CreateHUDLabel("HUD_SGD_L", "SGD Online Feedback:", 25, 135, clrSilver, 9, false);
-   CreateHUDLabel("HUD_SGD_V", "0 updates (Warm-Start)", 155, 135, clrAqua, 9, true);
+   CreateHUDLabel("HUD_SGD_V", "0 updates (Warm-Start)", 175, 135, clrAqua, 9, true);
 
    CreateHUDLabel("HUD_KEY_C", "[C] 1-Click Cluster (3-Tranche)", 25, 160, clrLime, 8, false);
    CreateHUDLabel("HUD_KEY_X", "[X] Emergency Close All", 25, 178, clrRed, 8, false);
