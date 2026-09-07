@@ -2,15 +2,14 @@
 mt5_brain_service.py — High-Frequency Local SGD AI Brain Microservice.
 
 Endpoints:
-  - POST /predict: Ingests tick features (rsi, macd_diff, ema_slope, volatility),
-                   returns direction, dynamic threshold, confidence, and
+  - POST /predict: Ingests tick features (rsi, macd_diff, ema_slope, volatility, adx),
+                   returns market regime, direction, dynamic threshold, confidence, and
                    Directional Strength Score (-100 to +100).
   - POST /feedback: Online warm-start partial_fit SGD training on trade P&L.
   - GET  /metrics: Model win rate, L2 regularization state, telemetry.
   - POST /cluster_trigger: Evaluates multi-tranche trigger when strength >= 35%.
 
 Database: ~/trading_poc.db
-IPC File Mirror: MQL5/Files/ai_signal.json
 """
 from __future__ import annotations
 
@@ -52,7 +51,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS predictions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
-                rsi REAL, macd_diff REAL, ema_slope REAL, volatility REAL,
+                rsi REAL, macd_diff REAL, ema_slope REAL, volatility REAL, adx REAL,
                 strength_score REAL NOT NULL,
                 direction INTEGER NOT NULL,
                 confidence REAL NOT NULL
@@ -65,7 +64,7 @@ def init_db():
                 trade_id TEXT,
                 direction INTEGER NOT NULL,
                 realized_pnl REAL NOT NULL,
-                rsi REAL, macd_diff REAL, ema_slope REAL, volatility REAL,
+                rsi REAL, macd_diff REAL, ema_slope REAL, volatility REAL, adx REAL,
                 learned_label INTEGER NOT NULL
             );
         """)
@@ -93,20 +92,20 @@ class SGDBrain:
         self.wins = 0
         self.losses = 0
 
-        # Pre-fit dummy values so classes [0, 1] exist (0=Loss/Sell, 1=Win/Buy)
+        # Pre-fit dummy values [rsi, macd_diff, ema_slope, volatility, adx]
         X_dummy = np.array([
-            [30.0, -0.5, -0.1, 0.001],
-            [70.0,  0.5,  0.1, 0.005],
-            [45.0, -0.2, -0.05, 0.002],
-            [55.0,  0.2,  0.05, 0.003],
+            [30.0, -0.5, -0.1, 0.001, 15.0],
+            [70.0,  0.5,  0.1, 0.005, 35.0],
+            [45.0, -0.2, -0.05, 0.002, 18.0],
+            [55.0,  0.2,  0.05, 0.003, 30.0],
         ])
         y_dummy = np.array([0, 1, 0, 1])
         self.scaler.fit(X_dummy)
         self.clf.partial_fit(self.scaler.transform(X_dummy), y_dummy, classes=np.array([0, 1]))
         self.is_fitted = True
 
-    def predict(self, rsi: float, macd_diff: float, ema_slope: float, volatility: float) -> dict:
-        features = np.array([[rsi, macd_diff, ema_slope, volatility]])
+    def predict(self, rsi: float, macd_diff: float, ema_slope: float, volatility: float, adx: float = 25.0) -> dict:
+        features = np.array([[rsi, macd_diff, ema_slope, volatility, adx]])
         feats_scaled = self.scaler.transform(features)
 
         # Class probabilities: [P(Loss/Sell), P(Win/Buy)]
@@ -114,8 +113,20 @@ class SGDBrain:
         prob_buy  = float(probs[1])
         prob_sell = float(probs[0])
 
-        # Directional Strength Score: -100 (Strong Bear) to +100 (Strong Bull)
-        strength_score = round((prob_buy - prob_sell) * 100.0, 2)
+        # Market Regime Detection
+        if adx >= 25.0:
+            regime = "TRENDING_EXPANSION"
+            regime_mult = 1.15
+        elif adx <= 18.0:
+            regime = "MEAN_REVERSION_RANGE"
+            regime_mult = 0.85
+        else:
+            regime = "TRANSITIONAL"
+            regime_mult = 1.0
+
+        # Directional Strength Score: -100 to +100
+        raw_score = (prob_buy - prob_sell) * 100.0 * regime_mult
+        strength_score = round(float(np.clip(raw_score, -100.0, 100.0)), 2)
 
         if strength_score >= 25.0:
             direction = 1   # BUY
@@ -127,7 +138,7 @@ class SGDBrain:
             direction = 0   # FLAT / NEUTRAL
             confidence = max(prob_buy, prob_sell)
 
-        threshold = 35.0  # Dynamic institutional trigger threshold
+        threshold = 35.0  # Dynamic trigger threshold
 
         result = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -135,6 +146,8 @@ class SGDBrain:
             "macd_diff": macd_diff,
             "ema_slope": ema_slope,
             "volatility": volatility,
+            "adx": adx,
+            "regime": regime,
             "strength_score": strength_score,
             "direction": direction,
             "confidence": round(confidence, 4),
@@ -142,7 +155,7 @@ class SGDBrain:
             "cluster_eligible": abs(strength_score) >= threshold,
         }
 
-        # Mirror to IPC file for MQL5 file-polling fallback
+        # Mirror to IPC file
         try:
             IPC_SIGNAL_FILE.write_text(json.dumps(result, indent=2))
         except Exception as e:
@@ -151,14 +164,14 @@ class SGDBrain:
         # Save prediction to SQLite
         with get_db() as conn:
             conn.execute("""
-                INSERT INTO predictions (timestamp, rsi, macd_diff, ema_slope, volatility, strength_score, direction, confidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-            """, (result["timestamp"], rsi, macd_diff, ema_slope, volatility, strength_score, direction, confidence))
+                INSERT INTO predictions (timestamp, rsi, macd_diff, ema_slope, volatility, adx, strength_score, direction, confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (result["timestamp"], rsi, macd_diff, ema_slope, volatility, adx, strength_score, direction, confidence))
             conn.commit()
 
         return result
 
-    def learn_feedback(self, trade_id: str, direction: int, realized_pnl: float, rsi: float, macd_diff: float, ema_slope: float, volatility: float):
+    def learn_feedback(self, trade_id: str, direction: int, realized_pnl: float, rsi: float, macd_diff: float, ema_slope: float, volatility: float, adx: float = 25.0):
         # 1 = Win, 0 = Loss
         label = 1 if realized_pnl > 0 else 0
         if realized_pnl > 0:
@@ -167,16 +180,15 @@ class SGDBrain:
             self.losses += 1
         self.feedback_count += 1
 
-        X = np.array([[rsi, macd_diff, ema_slope, volatility]])
-        # Partial fit online update
+        X = np.array([[rsi, macd_diff, ema_slope, volatility, adx]])
         X_scaled = self.scaler.transform(X)
         self.clf.partial_fit(X_scaled, np.array([label]))
 
         with get_db() as conn:
             conn.execute("""
-                INSERT INTO feedback (timestamp, trade_id, direction, realized_pnl, rsi, macd_diff, ema_slope, volatility, learned_label)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """, (datetime.now(timezone.utc).isoformat(), trade_id, direction, realized_pnl, rsi, macd_diff, ema_slope, volatility, label))
+                INSERT INTO feedback (timestamp, trade_id, direction, realized_pnl, rsi, macd_diff, ema_slope, volatility, adx, learned_label)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, (datetime.now(timezone.utc).isoformat(), trade_id, direction, realized_pnl, rsi, macd_diff, ema_slope, volatility, adx, label))
             conn.commit()
 
         logger.info(f"[SGD Learn] Trade {trade_id} feedback processed | PnL={realized_pnl:+.2f} | label={label} | total_feedback={self.feedback_count}")
@@ -189,6 +201,7 @@ class PredictRequest(BaseModel):
     macd_diff: float = 0.0
     ema_slope: float = 0.0
     volatility: float = 0.002
+    adx: float = 25.0
 
 class FeedbackRequest(BaseModel):
     trade_id: str = "XAU_001"
@@ -198,6 +211,7 @@ class FeedbackRequest(BaseModel):
     macd_diff: float = 0.0
     ema_slope: float = 0.0
     volatility: float = 0.002
+    adx: float = 25.0
 
 class ClusterTriggerRequest(BaseModel):
     strength_score: float
@@ -206,11 +220,11 @@ class ClusterTriggerRequest(BaseModel):
 # ── API Endpoints ─────────────────────────────────────────────────────────────
 @app.post("/predict")
 async def predict_endpoint(req: PredictRequest):
-    return brain.predict(req.rsi, req.macd_diff, req.ema_slope, req.volatility)
+    return brain.predict(req.rsi, req.macd_diff, req.ema_slope, req.volatility, req.adx)
 
 @app.post("/feedback")
 async def feedback_endpoint(req: FeedbackRequest):
-    brain.learn_feedback(req.trade_id, req.direction, req.realized_pnl, req.rsi, req.macd_diff, req.ema_slope, req.volatility)
+    brain.learn_feedback(req.trade_id, req.direction, req.realized_pnl, req.rsi, req.macd_diff, req.ema_slope, req.volatility, req.adx)
     return {"status": "learned", "feedback_count": brain.feedback_count}
 
 @app.get("/metrics")
@@ -250,7 +264,6 @@ async def cluster_trigger_endpoint(req: ClusterTriggerRequest):
         "tranches": tranches
     }
 
-    # Write command for MQL5 EA
     try:
         COMMAND_TRIGGER_FILE.write_text(json.dumps(trigger_payload, indent=2))
     except Exception as e:

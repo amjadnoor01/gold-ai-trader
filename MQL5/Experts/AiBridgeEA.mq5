@@ -54,12 +54,14 @@ double   m_last_rsi = 50.0;
 double   m_last_macd_diff = 0.0;
 double   m_last_ema_slope = 0.0;
 double   m_last_volatility = 0.002;
+double   m_last_adx = 25.0;
 
 // Technical Indicator Handles
 int      m_h_rsi = INVALID_HANDLE;
 int      m_h_macd = INVALID_HANDLE;
 int      m_h_ema = INVALID_HANDLE;
 int      m_h_atr = INVALID_HANDLE;
+int      m_h_adx = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -74,11 +76,12 @@ int OnInit()
    m_h_macd = iMACD(_Symbol, _Period, 12, 26, 9, PRICE_CLOSE);
    m_h_ema  = iMA(_Symbol, _Period, 20, 0, MODE_EMA, PRICE_CLOSE);
    m_h_atr  = iATR(_Symbol, _Period, 14);
+   m_h_adx  = iADX(_Symbol, _Period, 14);
 
    CreateHUDCanvas();
    UpdateHUDDisplay();
 
-   Print("[AiBridgeEA 2.50] Initialized with Autonomous Feature Extractor & SGD Feedback Tracker.");
+   Print("[AiBridgeEA 2.60] Initialized with Multi-Symbol Regime Engine & Volatility Trailing Safeguards.");
    return(INIT_SUCCEEDED);
 }
 
@@ -92,6 +95,7 @@ void OnDeinit(const int reason)
    IndicatorRelease(m_h_macd);
    IndicatorRelease(m_h_ema);
    IndicatorRelease(m_h_atr);
+   IndicatorRelease(m_h_adx);
    DestroyHUDCanvas();
    Print("[AiBridgeEA] Deinitialized. Reason: ", reason);
 }
@@ -453,38 +457,71 @@ void EmergencyCloseAll()
 }
 
 //+------------------------------------------------------------------+
-//| Manage Trailing Stop for Tranche 1                               |
+//| Manage ATR Trailing Stop & Breakeven Safeguard                   |
 //+------------------------------------------------------------------+
 void ManageTrailingStops()
 {
-   if(!InpTranche1Trail) return;
+   double atr_buf[1];
+   if(CopyBuffer(m_h_atr, 0, 0, 1, atr_buf) <= 0) return;
+   double atr = atr_buf[0];
+   if(atr <= 0) return;
+
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   long spread  = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(m_position.SelectByIndex(i))
       {
-         // CRITICAL BUGFIX: Filter by symbol matching current chart!
          if(m_position.Symbol() != _Symbol) continue;
+         ulong magic = m_position.Magic();
+         if(magic < InpBaseMagicNumber || magic > InpBaseMagicNumber + 10) continue;
 
-         if(m_position.Magic() == InpBaseMagicNumber + 1)
+         double open_price = m_position.PriceOpen();
+         double current_sl = m_position.StopLoss();
+
+         // 1. Breakeven Shield (+1.0x ATR profit reached)
+         if(m_position.PositionType() == POSITION_TYPE_BUY)
          {
-            double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-            double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-            double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-            double open_price = m_position.PriceOpen();
-            double current_sl = m_position.StopLoss();
-
-            if(m_position.PositionType() == POSITION_TYPE_BUY)
+            if(bid - open_price >= (1.0 * atr))
             {
-               double new_sl = NormalizeDouble(bid - (10 * 10 * point), _Digits);
-               if(bid - open_price > (8 * 10 * point) && (new_sl > current_sl || current_sl == 0))
+               double be_sl = NormalizeDouble(open_price + (spread * point), _Digits);
+               if(be_sl > current_sl || current_sl == 0)
+               {
+                  m_trade.PositionModify(m_position.Ticket(), be_sl, m_position.TakeProfit());
+                  Print(StringFormat("[Breakeven Shield] BUY position #%d locked at breakeven + spread", m_position.Ticket()));
+                  continue;
+               }
+            }
+
+            // 2. ATR Chandelier Trailing Stop (Tranche 1 & Tranche 3)
+            if(magic == InpBaseMagicNumber + 1 || magic == InpBaseMagicNumber + 3)
+            {
+               double new_sl = NormalizeDouble(bid - (1.2 * atr), _Digits);
+               if(bid - open_price > (1.2 * atr) && new_sl > current_sl)
                   m_trade.PositionModify(m_position.Ticket(), new_sl, m_position.TakeProfit());
             }
-            else if(m_position.PositionType() == POSITION_TYPE_SELL)
+         }
+         else if(m_position.PositionType() == POSITION_TYPE_SELL)
+         {
+            if(open_price - ask >= (1.0 * atr))
             {
-               double new_sl = NormalizeDouble(ask + (10 * 10 * point), _Digits);
-               if(open_price - ask > (8 * 10 * point) && (new_sl < current_sl || current_sl == 0))
+               double be_sl = NormalizeDouble(open_price - (spread * point), _Digits);
+               if(be_sl < current_sl || current_sl == 0)
+               {
+                  m_trade.PositionModify(m_position.Ticket(), be_sl, m_position.TakeProfit());
+                  Print(StringFormat("[Breakeven Shield] SELL position #%d locked at breakeven - spread", m_position.Ticket()));
+                  continue;
+               }
+            }
+
+            // 2. ATR Chandelier Trailing Stop (Tranche 1 & Tranche 3)
+            if(magic == InpBaseMagicNumber + 1 || magic == InpBaseMagicNumber + 3)
+            {
+               double new_sl = NormalizeDouble(ask + (1.2 * atr), _Digits);
+               if(open_price - ask > (1.2 * atr) && (new_sl < current_sl || current_sl == 0))
                   m_trade.PositionModify(m_position.Ticket(), new_sl, m_position.TakeProfit());
             }
          }
@@ -532,31 +569,31 @@ void CreateHUDCanvas()
    ObjectCreate(0, "HUD_BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_XDISTANCE, 15);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_YDISTANCE, 25);
-   ObjectSetInteger(0, "HUD_BG", OBJPROP_XSIZE, 320);
-   ObjectSetInteger(0, "HUD_BG", OBJPROP_YSIZE, 205);
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_XSIZE, 325);
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_YSIZE, 220);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_BGCOLOR, C'15,20,28');
    ObjectSetInteger(0, "HUD_BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_COLOR, C'38,47,61');
 
-   CreateHUDLabel("HUD_TITLE", "⚡ ANTIGRAVITY CONTINUOUS AI BRAIN 2.5", 25, 33, C'245,176,39', 9, true);
+   CreateHUDLabel("HUD_TITLE", "⚡ ANTIGRAVITY CONTINUOUS AI BRAIN 2.6", 25, 33, C'245,176,39', 9, true);
 
    CreateHUDLabel("HUD_SESSION_L", "Market Session:", 25, 55, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_SESSION_V", "LONDON / NY", 155, 55, C'248,250,252', 9, true);
+   CreateHUDLabel("HUD_SESSION_V", "LONDON / NY", 145, 55, C'248,250,252', 9, true);
 
    CreateHUDLabel("HUD_STRENGTH_L", "AI Strength Score:", 25, 75, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_STRENGTH_V", "+0.0 (NEUTRAL)", 155, 75, C'245,176,39', 9, true);
+   CreateHUDLabel("HUD_STRENGTH_V", "+0.0 (NEUTRAL)", 145, 75, C'245,176,39', 9, true);
 
    CreateHUDLabel("HUD_CLUSTER_L", "Active Cluster:", 25, 95, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_CLUSTER_V", "NONE (0 positions)", 155, 95, C'248,250,252', 9, true);
+   CreateHUDLabel("HUD_CLUSTER_V", "NONE (0 positions)", 145, 95, C'248,250,252', 9, true);
 
    CreateHUDLabel("HUD_PNL_L", "Cluster Floating PnL:", 25, 115, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_PNL_V", "$0.00", 155, 115, C'34,197,94', 9, true);
+   CreateHUDLabel("HUD_PNL_V", "$0.00", 145, 115, C'34,197,94', 9, true);
 
    CreateHUDLabel("HUD_SGD_L", "SGD Online Feedback:", 25, 135, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_SGD_V", "0 updates (Warm-Start)", 155, 135, C'59,130,246', 9, true);
+   CreateHUDLabel("HUD_SGD_V", "0 updates (Warm-Start)", 145, 135, C'59,130,246', 9, true);
 
    CreateHUDLabel("HUD_KEY_C", "[C] 1-Click Cluster (3-Tranche)", 25, 160, C'34,197,94', 8, false);
-   CreateHUDLabel("HUD_KEY_X", "[X] Emergency Close All", 25, 175, C'239,68,68', 8, false);
+   CreateHUDLabel("HUD_KEY_X", "[X] Emergency Close All", 25, 178, C'239,68,68', 8, false);
 
    ChartRedraw(0);
 }
