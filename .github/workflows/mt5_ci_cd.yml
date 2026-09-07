@@ -1,0 +1,49 @@
+name: MT5 Autonomous Engine CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Microservices & AI Brain CI/CD
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy pandas scikit-learn yfinance fastapi uvicorn pydantic pytest
+
+    - name: Verify Python AI Brain Microservice Syntax & Imports
+      run: |
+        python -c "import mt5_brain_service; print('✓ mt5_brain_service import successful')"
+        python -c "import mt5_autonomy_loop; print('✓ mt5_autonomy_loop import successful')"
+
+    - name: Run Automated Microservice Unit Tests
+      run: |
+        python -c "
+        from mt5_brain_service import SGDBrain
+        brain = SGDBrain()
+        res = brain.predict(rsi=55.0, macd_diff=0.2, ema_slope=0.05, volatility=0.003, adx=28.0)
+        assert 'strength_score' in res
+        assert 'direction' in res
+        assert 'regime' in res
+        print('✓ SGD Brain Prediction Unit Test Passed:', res)
+        "
+
+    - name: Verify MQL5 Expert Binary Integrity
+      run: |
+        test -f MQL5/Experts/AiBridgeEA.mq5 && echo "✓ AiBridgeEA.mq5 present"
+        test -f MQL5/Experts/AiBridgeEA.ex5 && echo "✓ Compiled AiBridgeEA.ex5 present"
