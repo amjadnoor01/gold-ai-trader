@@ -500,33 +500,47 @@ void ExecuteTradeCluster(int direction, string source_tag)
    Print(StringFormat("[Cluster Execution] Initiating 3-Tranche Cluster %s (%s) on %s | Dir=%s | Strength=%.1f | Lots=%.2f/%.2f/%.2f",
          m_active_cluster_id, source_tag, _Symbol, (direction == 1 ? "BUY" : "SELL"), m_current_strength, t1_lots, t2_lots, t3_lots));
 
+   // Dynamic ATR-Based Profit-Agnostic Boundaries
+   double atr_buf[1];
+   double atr = 0.0;
+   if(CopyBuffer(m_h_atr, 0, 0, 1, atr_buf) > 0) atr = atr_buf[0];
+   if(atr <= 0) atr = 100 * point;
+
+   double sl_dist  = 1.5 * atr;
+   double tp1_dist = 1.2 * atr;
+   double tp2_dist = 2.5 * atr;
+   double tp3_dist = 4.5 * atr;
+
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double entry_p = (direction == 1) ? ask : bid;
-   double tp_p    = (direction == 1) ? (ask + InpTranche2TP_Pips * 10 * point) : (bid - InpTranche2TP_Pips * 10 * point);
-   double sl_p    = (direction == 1) ? (ask - InpTranche1TP_Pips * 10 * point) : (bid + InpTranche1TP_Pips * 10 * point);
+   double sl_p    = NormalizeDouble((direction == 1) ? (ask - sl_dist) : (bid + sl_dist), digits);
+   double tp1_p   = NormalizeDouble((direction == 1) ? (ask + tp1_dist) : (bid - tp1_dist), digits);
+   double tp2_p   = NormalizeDouble((direction == 1) ? (ask + tp2_dist) : (bid - tp2_dist), digits);
+   double tp3_p   = NormalizeDouble((direction == 1) ? (ask + tp3_dist) : (bid - tp3_dist), digits);
 
    // Tranche 1: Alpha Scalp
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 1);
    if(direction == 1)
-      m_trade.Buy(t1_lots, _Symbol, ask, 0, ask + InpTranche1TP_Pips * 10 * point, m_active_cluster_id + "-T1");
+      m_trade.Buy(t1_lots, _Symbol, ask, sl_p, tp1_p, m_active_cluster_id + "-T1");
    else
-      m_trade.Sell(t1_lots, _Symbol, bid, 0, bid - InpTranche1TP_Pips * 10 * point, m_active_cluster_id + "-T1");
+      m_trade.Sell(t1_lots, _Symbol, bid, sl_p, tp1_p, m_active_cluster_id + "-T1");
 
    // Tranche 2: Core Trend
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 2);
    if(direction == 1)
-      m_trade.Buy(t2_lots, _Symbol, ask, 0, ask + InpTranche2TP_Pips * 10 * point, m_active_cluster_id + "-T2");
+      m_trade.Buy(t2_lots, _Symbol, ask, sl_p, tp2_p, m_active_cluster_id + "-T2");
    else
-      m_trade.Sell(t2_lots, _Symbol, bid, 0, bid - InpTranche2TP_Pips * 10 * point, m_active_cluster_id + "-T2");
+      m_trade.Sell(t2_lots, _Symbol, bid, sl_p, tp2_p, m_active_cluster_id + "-T2");
 
    // Tranche 3: Impulse Runner
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 3);
    if(direction == 1)
-      m_trade.Buy(t3_lots, _Symbol, ask, 0, ask + InpTranche3TP_Pips * 10 * point, m_active_cluster_id + "-T3");
+      m_trade.Buy(t3_lots, _Symbol, ask, sl_p, tp3_p, m_active_cluster_id + "-T3");
    else
-      m_trade.Sell(t3_lots, _Symbol, bid, 0, bid - InpTranche3TP_Pips * 10 * point, m_active_cluster_id + "-T3");
+      m_trade.Sell(t3_lots, _Symbol, bid, sl_p, tp3_p, m_active_cluster_id + "-T3");
 
    // Draw visually informative trade setup graphics on chart
-   DrawTradeSetupVisuals(direction, entry_p, tp_p, sl_p);
+   DrawTradeSetupVisuals(direction, entry_p, tp3_p, sl_p);
 }
 
 //+------------------------------------------------------------------+
@@ -662,33 +676,37 @@ void CreateHUDCanvas()
    DestroyHUDCanvas();
 
    ObjectCreate(0, "HUD_BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_XDISTANCE, 15);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_YDISTANCE, 25);
-   ObjectSetInteger(0, "HUD_BG", OBJPROP_XSIZE, 325);
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_XSIZE, 340);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_YSIZE, 220);
-   ObjectSetInteger(0, "HUD_BG", OBJPROP_BGCOLOR, C'15,20,28');
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_BGCOLOR, clrBlack);
    ObjectSetInteger(0, "HUD_BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetInteger(0, "HUD_BG", OBJPROP_COLOR, C'38,47,61');
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_COLOR, clrGold);
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_BACK, false);
+   ObjectSetInteger(0, "HUD_BG", OBJPROP_SELECTABLE, false);
 
-   CreateHUDLabel("HUD_TITLE", "⚡ ANTIGRAVITY CONTINUOUS AI BRAIN 2.6", 25, 33, C'245,176,39', 9, true);
+   CreateHUDLabel("HUD_TITLE", "⚡ ANTIGRAVITY AI BRAIN 3.0 (ENSEMBLE)", 25, 33, clrYellow, 10, true);
 
-   CreateHUDLabel("HUD_SESSION_L", "Market Session:", 25, 55, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_SESSION_V", "LONDON / NY", 145, 55, C'248,250,252', 9, true);
+   CreateHUDLabel("HUD_SESSION_L", "Market Session:", 25, 55, clrSilver, 9, false);
+   CreateHUDLabel("HUD_SESSION_V", "LONDON / NY", 155, 55, clrWhite, 9, true);
 
-   CreateHUDLabel("HUD_STRENGTH_L", "AI Strength Score:", 25, 75, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_STRENGTH_V", "+0.0 (NEUTRAL)", 145, 75, C'245,176,39', 9, true);
+   CreateHUDLabel("HUD_STRENGTH_L", "AI Strength Score:", 25, 75, clrSilver, 9, false);
+   CreateHUDLabel("HUD_STRENGTH_V", "+0.0 (NEUTRAL)", 155, 75, clrGold, 9, true);
 
-   CreateHUDLabel("HUD_CLUSTER_L", "Active Cluster:", 25, 95, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_CLUSTER_V", "NONE (0 positions)", 145, 95, C'248,250,252', 9, true);
+   CreateHUDLabel("HUD_CLUSTER_L", "Active Cluster:", 25, 95, clrSilver, 9, false);
+   CreateHUDLabel("HUD_CLUSTER_V", "NONE (0 positions)", 155, 95, clrWhite, 9, true);
 
-   CreateHUDLabel("HUD_PNL_L", "Cluster Floating PnL:", 25, 115, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_PNL_V", "$0.00", 145, 115, C'34,197,94', 9, true);
+   CreateHUDLabel("HUD_PNL_L", "Cluster Floating PnL:", 25, 115, clrSilver, 9, false);
+   CreateHUDLabel("HUD_PNL_V", "$0.00", 155, 115, clrLime, 9, true);
 
-   CreateHUDLabel("HUD_SGD_L", "SGD Online Feedback:", 25, 135, C'100,116,139', 9, false);
-   CreateHUDLabel("HUD_SGD_V", "0 updates (Warm-Start)", 145, 135, C'59,130,246', 9, true);
+   CreateHUDLabel("HUD_SGD_L", "SGD Online Feedback:", 25, 135, clrSilver, 9, false);
+   CreateHUDLabel("HUD_SGD_V", "0 updates (Warm-Start)", 155, 135, clrAqua, 9, true);
 
-   CreateHUDLabel("HUD_KEY_C", "[C] 1-Click Cluster (3-Tranche)", 25, 160, C'34,197,94', 8, false);
-   CreateHUDLabel("HUD_KEY_X", "[X] Emergency Close All", 25, 178, C'239,68,68', 8, false);
+   CreateHUDLabel("HUD_KEY_C", "[C] 1-Click Cluster (3-Tranche)", 25, 160, clrLime, 8, false);
+   CreateHUDLabel("HUD_KEY_X", "[X] Emergency Close All", 25, 178, clrRed, 8, false);
 
    ChartRedraw(0);
 }
@@ -696,12 +714,15 @@ void CreateHUDCanvas()
 void CreateHUDLabel(string name, string text, int x, int y, color clr, int font_size, bool bold)
 {
    ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
    ObjectSetString(0, name, OBJPROP_TEXT, text);
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetString(0, name, OBJPROP_FONT, bold ? "Arial Bold" : "Arial");
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 }
 
 void UpdateHUDDisplay()

@@ -177,8 +177,10 @@ class SGDBrain:
         return result
 
     def learn_feedback(self, trade_id: str, direction: int, realized_pnl: float, rsi: float, macd_diff: float, ema_slope: float, volatility: float, adx: float = 25.0):
-        # 1 = Win, 0 = Loss
-        label = 1 if realized_pnl > 0 else 0
+        # 1 = Win (> $0.05 PnL), 0 = Loss (< -$0.05 PnL), skip zero noise
+        if abs(realized_pnl) < 0.01:
+            return
+        label = 1 if realized_pnl > 0.05 else 0
         if realized_pnl > 0:
             self.wins += 1
         else:

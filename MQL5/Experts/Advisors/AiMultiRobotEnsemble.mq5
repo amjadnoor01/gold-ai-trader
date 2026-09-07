@@ -105,7 +105,14 @@ string ReadFileUTF(string filename)
    FileClose(handle);
    
    if(size >= 2 && buffer[0] == 0xFF && buffer[1] == 0xFE)
-      return ShortArrayToString(buffer, 2, (int)(size-2)/2);
+   {
+      ushort ubuffer[];
+      int ulen = (int)(size - 2) / 2;
+      ArrayResize(ubuffer, ulen);
+      for(int i = 0; i < ulen; i++)
+         ubuffer[i] = (ushort)(buffer[2 + i*2] | (buffer[3 + i*2] << 8));
+      return ShortArrayToString(ubuffer, 0, ulen);
+   }
       
    return CharArrayToString(buffer, 0, (int)size);
 }
@@ -215,9 +222,9 @@ double CalculateRobotScore_DOM()
       int size = ArraySize(book);
       for(int i = 0; i < size; i++)
       {
-         if(book[i].type == BOOK_TYPE_BID || book[i].type == BOOK_TYPE_BUY)
+         if(book[i].type == BOOK_TYPE_BUY)
             bid_vol += (double)book[i].volume;
-         else if(book[i].type == BOOK_TYPE_ASK || book[i].type == BOOK_TYPE_SELL)
+         else if(book[i].type == BOOK_TYPE_SELL)
             ask_vol += (double)book[i].volume;
       }
       double total_vol = bid_vol + ask_vol;
@@ -427,35 +434,46 @@ void ExecuteCluster(string direction_str, string cluster_id)
    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
+   // Dynamic Risk-Scaled Lot Sizing
+   double equity    = AccountInfoDouble(ACCOUNT_EQUITY);
+   double lot_scale = MathMax(0.5, MathMin(3.0, equity / 10000.0));
+   double t1_lots   = NormalizeDouble(InpTranche1Lots * lot_scale, 2);
+   double t2_lots   = NormalizeDouble(InpTranche2Lots * lot_scale, 2);
+   double t3_lots   = NormalizeDouble(InpTranche3Lots * lot_scale, 2);
+
    ENUM_ORDER_TYPE order_type = (direction_str == "BUY") ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double price               = (direction_str == "BUY") ? ask : bid;
 
-   // Tranche 1: Alpha Scalp
-   double tp1 = 0.0;
-   if(InpTranche1TP_Pips > 0)
-      tp1 = (direction_str == "BUY") ? price + (InpTranche1TP_Pips * 10 * point) : price - (InpTranche1TP_Pips * 10 * point);
+   // Dynamic ATR-Based Profit-Agnostic Boundaries
+   double atr_buf[1];
+   double atr = 0.0;
+   if(CopyBuffer(m_h_atr, 0, 0, 1, atr_buf) > 0) atr = atr_buf[0];
+   if(atr <= 0) atr = 100 * point;
 
+   double sl_dist  = 1.5 * atr;
+   double tp1_dist = 1.2 * atr;
+   double tp2_dist = 2.5 * atr;
+   double tp3_dist = 4.5 * atr;
+
+   double sl_p  = NormalizeDouble((direction_str == "BUY") ? (price - sl_dist) : (price + sl_dist), digits);
+   double tp1_p = NormalizeDouble((direction_str == "BUY") ? (price + tp1_dist) : (price - tp1_dist), digits);
+   double tp2_p = NormalizeDouble((direction_str == "BUY") ? (price + tp2_dist) : (price - tp2_dist), digits);
+   double tp3_p = NormalizeDouble((direction_str == "BUY") ? (price + tp3_dist) : (price - tp3_dist), digits);
+
+   // Tranche 1: Alpha Scalp
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 1);
-   if(m_trade.PositionOpen(_Symbol, order_type, InpTranche1Lots, price, 0, NormalizeDouble(tp1, digits), "T1 Scalp " + cluster_id))
-      Print("Tranche 1 executed | ", direction_str, " | Lot=", InpTranche1Lots);
+   if(m_trade.PositionOpen(_Symbol, order_type, t1_lots, price, sl_p, tp1_p, "T1 Scalp " + cluster_id))
+      Print("Tranche 1 executed | ", direction_str, " | Lot=", t1_lots, " | TP=", tp1_p, " | SL=", sl_p);
 
    // Tranche 2: Core Trend
-   double tp2 = 0.0;
-   if(InpTranche2TP_Pips > 0)
-      tp2 = (direction_str == "BUY") ? price + (InpTranche2TP_Pips * 10 * point) : price - (InpTranche2TP_Pips * 10 * point);
-
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 2);
-   if(m_trade.PositionOpen(_Symbol, order_type, InpTranche2Lots, price, 0, NormalizeDouble(tp2, digits), "T2 Trend " + cluster_id))
-      Print("Tranche 2 executed | ", direction_str, " | Lot=", InpTranche2Lots);
+   if(m_trade.PositionOpen(_Symbol, order_type, t2_lots, price, sl_p, tp2_p, "T2 Trend " + cluster_id))
+      Print("Tranche 2 executed | ", direction_str, " | Lot=", t2_lots, " | TP=", tp2_p, " | SL=", sl_p);
 
    // Tranche 3: Impulse Runner
-   double tp3 = 0.0;
-   if(InpTranche3TP_Pips > 0)
-      tp3 = (direction_str == "BUY") ? price + (InpTranche3TP_Pips * 10 * point) : price - (InpTranche3TP_Pips * 10 * point);
-
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 3);
-   if(m_trade.PositionOpen(_Symbol, order_type, InpTranche3Lots, price, 0, NormalizeDouble(tp3, digits), "T3 Runner " + cluster_id))
-      Print("Tranche 3 executed | ", direction_str, " | Lot=", InpTranche3Lots);
+   if(m_trade.PositionOpen(_Symbol, order_type, t3_lots, price, sl_p, tp3_p, "T3 Runner " + cluster_id))
+      Print("Tranche 3 executed | ", direction_str, " | Lot=", t3_lots, " | TP=", tp3_p, " | SL=", sl_p);
 
    m_active_cluster_id = cluster_id;
 }
