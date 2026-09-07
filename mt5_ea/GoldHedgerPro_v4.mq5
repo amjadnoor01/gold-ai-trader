@@ -78,28 +78,28 @@ input ENUM_ENTRY_MODE InpEntryMode   = ENTRY_VOLUME_OR_SWEEP;
 
 input group "=== VOLUME + ADX ENTRY ==="
 input int      InpADXPeriod          = 7;
-input double   InpADXMinLevel        = 22.0;
-input double   InpVolumeThreshold    = 1.5;
+input double   InpADXMinLevel        = 10.0;
+input double   InpVolumeThreshold    = 0.5;
 input int      InpVolumeAvgBars      = 20;
-input ENUM_TIMEFRAMES InpEntryTF     = PERIOD_M20;
+input ENUM_TIMEFRAMES InpEntryTF     = PERIOD_CURRENT;
 
 input group "=== V4: LIQUIDITY SWEEP DETECTION ==="
 input int      InpSweepLookback      = 30;
 input int      InpSwingFractalPeriod = 5;        // v4: now actually used for fractal swing detection
-input double   InpSweepMinWickPips   = 15.0;
+input double   InpSweepMinWickPips   = 3.0;
 input double   InpSweepMaxBodyPct    = 40.0;
 input int      InpSweepValidityBars  = 3;
-input bool     InpRequireBOSConfirm  = true;     // v4: require BOS before sweep entry
+input bool     InpRequireBOSConfirm  = false;    // v4: require BOS before sweep entry
 
 input group "=== V4: SESSION PROFILES ==="
-input bool     InpUseSessionProfiles = true;
+input bool     InpUseSessionProfiles = false;
 
 input group "--- Asian Session ---"
-input bool     InpAsianEnabled       = false;
+input bool     InpAsianEnabled       = true;
 input string   InpAsianStart         = "00:00";  // server confirmed GMT+0; Tokyo session ~00:00-08:00 UTC
 input string   InpAsianEnd           = "08:00";
-input double   InpAsianADXMin        = 28.0;
-input double   InpAsianVolThreshold  = 2.0;
+input double   InpAsianADXMin        = 10.0;
+input double   InpAsianVolThreshold  = 0.5;
 input double   InpAsianATRMult       = 1.0;
 input int      InpAsianMaxPositions  = 3;
 
@@ -107,8 +107,8 @@ input group "--- London Session ---"
 input bool     InpLondonEnabled      = true;
 input string   InpLondonStart        = "08:00";  // London open ~08:00 UTC
 input string   InpLondonEnd          = "13:00";  // until NY/overlap begins
-input double   InpLondonADXMin       = 20.0;
-input double   InpLondonVolThreshold = 1.5;
+input double   InpLondonADXMin       = 10.0;
+input double   InpLondonVolThreshold = 0.5;
 input double   InpLondonATRMult      = 1.3;
 input int      InpLondonMaxPositions = 4;
 
@@ -116,8 +116,8 @@ input group "--- London/NY Overlap ---"
 input bool     InpOverlapEnabled     = true;
 input string   InpOverlapStart       = "13:00";  // NY open / London-NY overlap, highest liquidity
 input string   InpOverlapEnd         = "17:00";  // London close ~17:00 UTC
-input double   InpOverlapADXMin      = 18.0;
-input double   InpOverlapVolThreshold = 1.3;
+input double   InpOverlapADXMin      = 10.0;
+input double   InpOverlapVolThreshold = 0.5;
 input double   InpOverlapATRMult     = 1.5;
 input int      InpOverlapMaxPositions = 5;
 
@@ -125,18 +125,18 @@ input group "--- NY Close ---"
 input bool     InpNYCloseEnabled     = true;
 input string   InpNYCloseStart       = "17:00";  // NY afternoon, tapering liquidity into close
 input string   InpNYCloseEnd         = "21:00";  // FX/gold weekday close ~21:00-22:00 UTC
-input double   InpNYCloseADXMin      = 25.0;
-input double   InpNYCloseVolThreshold = 1.7;
+input double   InpNYCloseADXMin      = 10.0;
+input double   InpNYCloseVolThreshold = 0.5;
 input double   InpNYCloseATRMult     = 1.4;
 input int      InpNYCloseMaxPositions = 3;
 
 input group "=== TIER 1: MULTI-TF TREND FILTER ==="
-input bool     InpUseTrendFilter     = true;
+input bool     InpUseTrendFilter     = false;
 input ENUM_TIMEFRAMES InpTrendTF     = PERIOD_H1;
 input int      InpTrendEMAPeriod     = 50;
 
 input group "=== TIER 1: NEWS FILTER ==="
-input bool     InpUseNewsFilter      = true;
+input bool     InpUseNewsFilter      = false;
 input int      InpNewsMinutesBefore  = 30;       // Block starts this many minutes before the event
 input int      InpNewsImportance     = 3;
 input bool     InpFlattenBeforeNews  = false;    // v4.1: close active basket when news window opens (locks in current P&L)
@@ -175,6 +175,11 @@ input string   InpTradeEndTime       = "21:00";  // matches NY close session end
 input group "=== EA IDENTITY ==="
 input long     InpMagicNumber        = 11111;
 input string   InpComment            = "GHPv4";
+
+input group "=== AI PYTHON BRIDGE ==="
+input bool     InpUseAIBridge        = true;     // Accept signals from Python Quant AI / Gemini
+input string   InpBridgeCommandFile  = "ai_signals.json";
+input string   InpBridgeStateFile    = "mt5_state.json";
 
 //+------------------------------------------------------------------+
 //| GLOBALS                                                           |
@@ -346,6 +351,9 @@ void OnTick()
       return;
    }
 
+   // --- AI PYTHON BRIDGE & TELEMETRY ---
+   CheckAIBridgeCommands();
+
    // v4.2: evaluated once per tick — starts blocking InpNewsMinutesBefore
    // ahead of a high-impact event, then keeps blocking dynamically until
    // ATR and spread settle back near pre-news levels (capped by
@@ -385,7 +393,9 @@ void OnTick()
 
    ManageWeekendHedge();
 
-   datetime currentBarTime = iTime(Symbol(), InpEntryTF, 0);
+   ENUM_TIMEFRAMES evalTF = InpEntryTF;
+   if(iBars(Symbol(), evalTF) < 20) evalTF = (ENUM_TIMEFRAMES)_Period;
+   datetime currentBarTime = iTime(Symbol(), evalTF, 0);
    if(currentBarTime == LastBarTime) {
       UpdateInfoPanel();
       return;
@@ -703,9 +713,9 @@ void CheckEntrySignal()
                          MathMin(InpMaxDistancePips * PipValue, atr * ActiveParams.atrMult));
       double spreadPips = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD) * PointSize / PipValue;
       double gridPips   = gridDist / PipValue;
-      if(spreadPips > gridPips * 0.15) {
+      if(spreadPips > gridPips * 0.60) {
          Print("Entry skipped: spread ", DoubleToString(spreadPips, 1),
-               " pips > 15% of grid ", DoubleToString(gridPips, 1), " pips");
+               " pips > 60% of grid ", DoubleToString(gridPips, 1), " pips");
          return;
       }
    }
@@ -1311,6 +1321,118 @@ void UpdateInfoPanel()
    );
 
    Comment(panel);
+}
+
+//+------------------------------------------------------------------+
+//| AI PYTHON BRIDGE & TELEMETRY FUNCTIONS                           |
+//+------------------------------------------------------------------+
+string ExtractJsonValue(string json, string key)
+{
+   string needle = "\"" + key + "\":";
+   int pos = StringFind(json, needle);
+   if(pos < 0) return "";
+   pos += StringLen(needle);
+   while(pos < StringLen(json) && (StringGetCharacter(json, pos) == ' ' || StringGetCharacter(json, pos) == '\"')) pos++;
+   int end = pos;
+   while(end < StringLen(json) && StringGetCharacter(json, end) != '\"' && StringGetCharacter(json, end) != ',' && StringGetCharacter(json, end) != '}') end++;
+   return StringSubstr(json, pos, end - pos);
+}
+
+void WriteMT5StateJSON()
+{
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double margin  = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double profit  = AccountInfoDouble(ACCOUNT_PROFIT);
+   double bid     = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+   double ask     = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+   long   spread  = SymbolInfoInteger(Symbol(), SYMBOL_SPREAD);
+
+   int posCount = PositionsTotal();
+   string posJson = "[";
+   int added = 0;
+   for(int i = 0; i < posCount; i++) {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket > 0) {
+         if(added > 0) posJson += ",";
+         string sym = PositionGetString(POSITION_SYMBOL);
+         long type  = PositionGetInteger(POSITION_TYPE);
+         double vol = PositionGetDouble(POSITION_VOLUME);
+         double op  = PositionGetDouble(POSITION_PRICE_OPEN);
+         double cp  = PositionGetDouble(POSITION_PRICE_CURRENT);
+         double sl  = PositionGetDouble(POSITION_SL);
+         double tp  = PositionGetDouble(POSITION_TP);
+         double p   = PositionGetDouble(POSITION_PROFIT);
+         string dir = (type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+         posJson += StringFormat("{\"ticket\":%I64u,\"symbol\":\"%s\",\"direction\":\"%s\",\"volume\":%.2f,\"open_price\":%.2f,\"current_price\":%.2f,\"sl\":%.2f,\"tp\":%.2f,\"profit\":%.2f}",
+                                 ticket, sym, dir, vol, op, cp, sl, tp, p);
+         added++;
+      }
+   }
+   posJson += "]";
+
+   string stateJson = StringFormat(
+      "{\"timestamp\":%I64d,\"account_id\":%I64u,\"server\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"free_margin\":%.2f,\"profit\":%.2f,\"symbol\":\"%s\",\"bid\":%.2f,\"ask\":%.2f,\"spread\":%I64d,\"basket_active\":%s,\"buy_count\":%d,\"sell_count\":%d,\"positions\":%s}",
+      TimeCurrent(), (ulong)AccountInfoInteger(ACCOUNT_LOGIN), AccountInfoString(ACCOUNT_SERVER),
+      balance, equity, margin, profit, Symbol(), bid, ask, spread,
+      Basket.active ? "true" : "false", Basket.buyCount, Basket.sellCount, posJson
+   );
+
+   int h = FileOpen(InpBridgeStateFile, FILE_WRITE|FILE_TXT|FILE_ANSI);
+   if(h != INVALID_HANDLE) {
+      FileWriteString(h, stateJson);
+      FileClose(h);
+   }
+}
+
+void CheckAIBridgeCommands()
+{
+   if(!InpUseAIBridge) return;
+
+   // 1. Output current MT5 status to mt5_state.json every 1 sec
+   static datetime lastStateWrite = 0;
+   if(TimeCurrent() - lastStateWrite >= 1) {
+      lastStateWrite = TimeCurrent();
+      WriteMT5StateJSON();
+   }
+
+   // 2. Check for inbound command from Python AI
+   if(!FileIsExist(InpBridgeCommandFile)) return;
+
+   int h = FileOpen(InpBridgeCommandFile, FILE_READ|FILE_TXT|FILE_ANSI);
+   if(h == INVALID_HANDLE) return;
+
+   string json = "";
+   while(!FileIsEnding(h)) {
+      json += FileReadString(h);
+   }
+   FileClose(h);
+
+   if(StringLen(json) == 0) return;
+
+   string action = ExtractJsonValue(json, "action");
+   FileDelete(InpBridgeCommandFile);
+
+   string targetSymbol = ExtractJsonValue(json, "symbol");
+   if(targetSymbol != "" && StringFind(Symbol(), targetSymbol) < 0 && StringFind(targetSymbol, Symbol()) < 0) return;
+
+   if(action == "BUY") {
+      double lot = StringToDouble(ExtractJsonValue(json, "volume"));
+      if(lot <= 0) lot = InpBaseLot;
+      Print("[AI_BRIDGE] Executing BUY signal from Python AI Ensemble on ", Symbol(), " | Lot: ", lot);
+      OpenBasketTrade(ORDER_TYPE_BUY, lot, "AI_BUY", false, InpBasketProfitUSD);
+   }
+   else if(action == "SELL") {
+      double lot = StringToDouble(ExtractJsonValue(json, "volume"));
+      if(lot <= 0) lot = InpBaseLot;
+      Print("[AI_BRIDGE] Executing SELL signal from Python AI Ensemble on ", Symbol(), " | Lot: ", lot);
+      OpenBasketTrade(ORDER_TYPE_SELL, lot, "AI_SELL", false, InpBasketProfitUSD);
+   }
+   else if(action == "CLOSE_ALL" || action == "FLATTEN") {
+      Print("[AI_BRIDGE] Executing CLOSE_ALL from Python AI on ", Symbol());
+      CloseAllBasketPositions("AI_BRIDGE_FLATTEN");
+      ResetBasket();
+   }
 }
 
 //+------------------------------------------------------------------+

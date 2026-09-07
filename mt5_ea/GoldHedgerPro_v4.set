@@ -47,10 +47,10 @@ InpEntryMode=2
 
 ;=== VOLUME + ADX ENTRY ===
 InpADXPeriod=7
-InpADXMinLevel=22.0
-InpVolumeThreshold=1.5
+InpADXMinLevel=12.0
+InpVolumeThreshold=0.5
 InpVolumeAvgBars=20
-InpEntryTF=20
+InpEntryTF=0
 
 ;=== V4: LIQUIDITY SWEEP DETECTION ===
 InpSweepLookback=30
@@ -58,17 +58,17 @@ InpSwingFractalPeriod=5
 InpSweepMinWickPips=15.0
 InpSweepMaxBodyPct=40.0
 InpSweepValidityBars=3
-InpRequireBOSConfirm=true
+InpRequireBOSConfirm=false
 
 ;=== V4: SESSION PROFILES ===
 InpUseSessionProfiles=true
 
 ;--- Asian Session (Tokyo, ~00:00-08:00 UTC) ---
-InpAsianEnabled=false
+InpAsianEnabled=true
 InpAsianStart=00:00
 InpAsianEnd=08:00
-InpAsianADXMin=28.0
-InpAsianVolThreshold=2.0
+InpAsianADXMin=12.0
+InpAsianVolThreshold=0.5
 InpAsianATRMult=1.0
 InpAsianMaxPositions=3
 
@@ -76,8 +76,8 @@ InpAsianMaxPositions=3
 InpLondonEnabled=true
 InpLondonStart=08:00
 InpLondonEnd=13:00
-InpLondonADXMin=20.0
-InpLondonVolThreshold=1.5
+InpLondonADXMin=12.0
+InpLondonVolThreshold=0.5
 InpLondonATRMult=1.3
 InpLondonMaxPositions=4
 
@@ -85,8 +85,8 @@ InpLondonMaxPositions=4
 InpOverlapEnabled=true
 InpOverlapStart=13:00
 InpOverlapEnd=17:00
-InpOverlapADXMin=18.0
-InpOverlapVolThreshold=1.3
+InpOverlapADXMin=12.0
+InpOverlapVolThreshold=0.5
 InpOverlapATRMult=1.5
 InpOverlapMaxPositions=5
 
@@ -94,13 +94,13 @@ InpOverlapMaxPositions=5
 InpNYCloseEnabled=true
 InpNYCloseStart=17:00
 InpNYCloseEnd=21:00
-InpNYCloseADXMin=25.0
-InpNYCloseVolThreshold=1.7
+InpNYCloseADXMin=12.0
+InpNYCloseVolThreshold=0.5
 InpNYCloseATRMult=1.4
 InpNYCloseMaxPositions=3
 
 ;=== TIER 1: MULTI-TF TREND FILTER ===
-InpUseTrendFilter=true
+InpUseTrendFilter=false
 InpTrendTF=16385
 InpTrendEMAPeriod=50
 
@@ -148,3 +148,8 @@ InpTradeEndTime=21:00
 ;=== EA IDENTITY ===
 InpMagicNumber=11111
 InpComment=GHPv4
+
+;=== AI PYTHON BRIDGE ===
+InpUseAIBridge=true
+InpBridgeCommandFile=ai_signals.json
+InpBridgeStateFile=mt5_state.json

@@ -12,10 +12,14 @@ This prevents silent failures that cost money.
 """
 
 import logging
-import time
-from datetime import datetime, timedelta
+import math
+from datetime import datetime
 from collections import deque
-import numpy as np
+
+try:
+    import numpy as np  # type: ignore
+except ImportError:
+    np = None  # type: ignore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -142,7 +146,10 @@ class LiveTradingMonitor:
         current_latency = state.get('latency_ms', 0)
         self.latency_history.append(current_latency)
 
-        avg_latency = np.mean(list(self.latency_history))
+        if np is not None:
+            avg_latency = float(np.mean(list(self.latency_history)))
+        else:
+            avg_latency = sum(self.latency_history) / max(len(self.latency_history), 1)
 
         if avg_latency > self.max_latency_ms:
             self._send_alert(f"WARNING: High latency ({avg_latency:.0f}ms)", priority="WARNING")
@@ -222,7 +229,7 @@ class LiveTradingMonitor:
             q_val = q.get(key, 0.5)  # Default if missing
 
             if p_val > 0 and q_val > 0:
-                kl += p_val * np.log(p_val / q_val)
+                kl += p_val * math.log(p_val / q_val)
 
         return kl
 
@@ -297,8 +304,15 @@ class LiveTradingMonitor:
         running_time = (datetime.now() - self.start_time).total_seconds() / 3600
 
         if len(self.pnl_history) > 0:
-            returns = np.array(list(self.pnl_history))
-            sharpe = returns.mean() / (returns.std() + 1e-10) * np.sqrt(252 * 24)
+            if np is not None:
+                returns = np.array(list(self.pnl_history))
+                sharpe = float(returns.mean() / (returns.std() + 1e-10) * np.sqrt(252 * 24))
+            else:
+                p_list = list(self.pnl_history)
+                mean_p = sum(p_list) / len(p_list)
+                var_p = sum((x - mean_p) ** 2 for x in p_list) / len(p_list)
+                std_p = math.sqrt(var_p)
+                sharpe = float((mean_p / (std_p + 1e-10)) * math.sqrt(252 * 24))
         else:
             sharpe = 0.0
 

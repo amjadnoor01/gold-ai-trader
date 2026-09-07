@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 WEIGHTS_FILE = Path("logs/learner_weights.json")
 WEIGHTS_FILE.parent.mkdir(exist_ok=True)
 
-MODELS = ["ppo", "trend", "mean_rev", "momentum", "macro"]
-MIN_W  = 0.10   # floor: 10 % each
-MAX_W  = 0.60   # ceiling: 60 % each
+MODELS = ["ppo", "trend", "mean_rev", "momentum", "macro", "google_ai"]
+MIN_W  = 0.08   # floor: 8 % each
+MAX_W  = 0.45   # ceiling: 45 % each
 
 
 def _uniform() -> Dict[str, float]:
@@ -44,7 +44,7 @@ class ClosedLoopLearner:
     def __init__(self):
         self.iterations = 0
         self.weights: Dict[str, float] = self._load_weights()
-        self._regret: Dict[str, float] = {m: self.weights[m] for m in MODELS}
+        self._regret: Dict[str, float] = {m: self.weights.get(m, 1.0 / len(MODELS)) for m in MODELS}
 
     # ── Persistence ──────────────────────────────────────────────────────────
     def _load_weights(self) -> Dict[str, float]:
@@ -72,13 +72,22 @@ class ClosedLoopLearner:
 
         # Map regime → which "model" gets credit/blame
         regime_model_map = {
-            "DRL_PPO":    "ppo",
-            "TREND":      "trend",
-            "MEAN_REV":   "mean_rev",
-            "MOMENTUM":   "momentum",
-            "MACRO":      "macro",
+            "DRL_PPO":        "ppo",
+            "ML_POLICY":      "ppo",
+            "TREND":          "trend",
+            "QUANT_TREND":    "trend",
+            "MEAN_REV":       "mean_rev",
+            "QUANT_MEAN_REV": "mean_rev",
+            "MOMENTUM":       "momentum",
+            "QUANT_MOMENTUM": "momentum",
+            "MACRO":          "macro",
+            "QUANT_MACRO":    "macro",
+            "GOOGLE_AI":      "google_ai",
+            "GOOGLE_QUANT":   "google_ai",
+            "GOOGLE_TREND":   "google_ai",
+            "GOOGLE_REVERSAL":"google_ai",
         }
-        primary = regime_model_map.get(regime, "ppo")
+        primary = regime_model_map.get(regime, "trend")
 
         market_went_up = (trade.get("direction") == "BUY" and pnl > 0) or \
                          (trade.get("direction") == "SELL" and pnl < 0)
