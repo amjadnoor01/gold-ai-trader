@@ -144,7 +144,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 }
 
 //+------------------------------------------------------------------+
-//| Extract Live Features & Export to IPC live_features.json         |
+//| Extract Live Features & Export to IPC live_features_<SYMBOL>.json|
 //+------------------------------------------------------------------+
 void ExtractAndExportFeatures()
 {
@@ -167,17 +167,29 @@ void ExtractAndExportFeatures()
    m_last_ema_slope = ema_slope;
    m_last_volatility = vol;
 
-   string json = StringFormat("{\"rsi\":%.2f,\"macd_diff\":%.4f,\"ema_slope\":%.4f,\"volatility\":%.4f}",
-                              rsi, macd_diff, ema_slope, vol);
+   string json = StringFormat("{\"symbol\":\"%s\",\"rsi\":%.2f,\"macd_diff\":%.4f,\"ema_slope\":%.4f,\"volatility\":%.4f}",
+                              _Symbol, rsi, macd_diff, ema_slope, vol);
 
-   int handle = FileOpen("live_features.json", FILE_WRITE|FILE_TXT|FILE_COMMON);
+   // Export to symbol-specific file
+   string file_sym = StringFormat("live_features_%s.json", _Symbol);
+   int handle = FileOpen(file_sym, FILE_WRITE|FILE_TXT|FILE_COMMON);
    if(handle == INVALID_HANDLE)
-      handle = FileOpen("live_features.json", FILE_WRITE|FILE_TXT);
+      handle = FileOpen(file_sym, FILE_WRITE|FILE_TXT);
 
    if(handle != INVALID_HANDLE)
    {
       FileWriteString(handle, json);
       FileClose(handle);
+   }
+
+   // Also update main live_features.json
+   int handle_main = FileOpen("live_features.json", FILE_WRITE|FILE_TXT|FILE_COMMON);
+   if(handle_main == INVALID_HANDLE)
+      handle_main = FileOpen("live_features.json", FILE_WRITE|FILE_TXT);
+   if(handle_main != INVALID_HANDLE)
+   {
+      FileWriteString(handle_main, json);
+      FileClose(handle_main);
    }
 }
 
@@ -186,9 +198,16 @@ void ExtractAndExportFeatures()
 //+------------------------------------------------------------------+
 void PollAISignal()
 {
-   int handle = FileOpen("ai_signal.json", FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_READ);
+   string file_sym = StringFormat("ai_signal_%s.json", _Symbol);
+   int handle = FileOpen(file_sym, FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_READ);
    if(handle == INVALID_HANDLE)
-      handle = FileOpen("ai_signal.json", FILE_READ|FILE_TXT);
+      handle = FileOpen(file_sym, FILE_READ|FILE_TXT);
+   if(handle == INVALID_HANDLE)
+   {
+      handle = FileOpen("ai_signal.json", FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_READ);
+      if(handle == INVALID_HANDLE)
+         handle = FileOpen("ai_signal.json", FILE_READ|FILE_TXT);
+   }
 
    if(handle != INVALID_HANDLE)
    {
@@ -219,9 +238,19 @@ void PollAISignal()
 //+------------------------------------------------------------------+
 void CheckClusterCommands()
 {
-   int handle = FileOpen("cluster_command.json", FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_READ);
+   string file_sym = StringFormat("cluster_command_%s.json", _Symbol);
+   int handle = FileOpen(file_sym, FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_READ);
    if(handle == INVALID_HANDLE)
-      handle = FileOpen("cluster_command.json", FILE_READ|FILE_TXT);
+      handle = FileOpen(file_sym, FILE_READ|FILE_TXT);
+   string target_file = file_sym;
+
+   if(handle == INVALID_HANDLE)
+   {
+      handle = FileOpen("cluster_command.json", FILE_READ|FILE_TXT|FILE_COMMON|FILE_SHARE_READ);
+      if(handle == INVALID_HANDLE)
+         handle = FileOpen("cluster_command.json", FILE_READ|FILE_TXT);
+      target_file = "cluster_command.json";
+   }
 
    if(handle != INVALID_HANDLE)
    {
@@ -230,11 +259,19 @@ void CheckClusterCommands()
          json_text += FileReadString(handle);
       FileClose(handle);
 
-      FileDelete("cluster_command.json");
+      FileDelete(target_file);
 
       if(StringLen(json_text) > 10)
       {
-         Print("[Cluster Command] Found auto trigger: ", json_text);
+         // Verify target symbol if specified
+         int sym_idx = StringFind(json_text, "\"symbol\":");
+         if(sym_idx >= 0)
+         {
+            if(StringFind(json_text, _Symbol) < 0 && StringFind(json_text, "ALL") < 0)
+               return; // Command meant for another symbol
+         }
+
+         Print(StringFormat("[Cluster Command] Found trigger for %s: %s", _Symbol, json_text));
          int dir = (StringFind(json_text, "BUY") >= 0) ? 1 : -1;
          ExecuteTradeCluster(dir, "AUTONOMOUS_TRIGGER");
       }
@@ -310,40 +347,87 @@ void ParseSignalJson(string json)
 }
 
 //+------------------------------------------------------------------+
+//| Margin & Risk Management Safeguard Check                         |
+//+------------------------------------------------------------------+
+bool IsMarginSafe()
+{
+   double free_margin  = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double balance      = AccountInfoDouble(ACCOUNT_BALANCE);
+   double margin_level = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+
+   // 1. Min Free Margin Guard ($500 minimum or >= 15% of account balance)
+   if(free_margin < 500.0 || (balance > 0 && (free_margin / balance) < 0.15))
+   {
+      Print(StringFormat("[Margin Safeguard] Trade rejected! Low Free Margin: $%.2f (Min required: 15%% of $%.2f)", free_margin, balance));
+      return false;
+   }
+
+   // 2. Margin Level Guard (Min 200% margin level if margin in use > 0)
+   if(margin_level > 0 && margin_level < 200.0)
+   {
+      Print(StringFormat("[Margin Safeguard] Trade rejected! Low Margin Level: %.1f%% (Min required: 200%%)", margin_level));
+      return false;
+   }
+
+   // 3. Max Active Cluster Position Cap (Max 9 cluster positions across account)
+   if(GetActiveClusterPositionCount() >= 9)
+   {
+      Print("[Margin Safeguard] Trade rejected! Max active cluster position cap (9) reached.");
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| Execute 3-Tranche Aggressive Trade Cluster                       |
 //+------------------------------------------------------------------+
 void ExecuteTradeCluster(int direction, string source_tag)
 {
    if(direction == 0) direction = 1;
 
+   // Enforce strict margin management guard
+   if(!IsMarginSafe())
+   {
+      Print("[Cluster Execution] Aborted trade cluster due to Margin/Risk Safeguard.");
+      return;
+   }
+
+   // Dynamic Risk-Scaled Lot Sizing
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double lot_scale = MathMax(0.5, MathMin(3.0, equity / 10000.0));
+   double t1_lots   = NormalizeDouble(InpTranche1Lots * lot_scale, 2);
+   double t2_lots   = NormalizeDouble(InpTranche2Lots * lot_scale, 2);
+   double t3_lots   = NormalizeDouble(InpTranche3Lots * lot_scale, 2);
+
    m_active_cluster_id = StringFormat("CL-%d", TimeCurrent() % 10000);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
 
-   Print(StringFormat("[Cluster Execution] Initiating 3-Tranche Cluster %s (%s) | Dir=%s | Strength=%.1f",
-         m_active_cluster_id, source_tag, (direction == 1 ? "BUY" : "SELL"), m_current_strength));
+   Print(StringFormat("[Cluster Execution] Initiating 3-Tranche Cluster %s (%s) on %s | Dir=%s | Strength=%.1f | Lots=%.2f/%.2f/%.2f",
+         m_active_cluster_id, source_tag, _Symbol, (direction == 1 ? "BUY" : "SELL"), m_current_strength, t1_lots, t2_lots, t3_lots));
 
    // Tranche 1: Alpha Scalp
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 1);
    if(direction == 1)
-      m_trade.Buy(InpTranche1Lots, _Symbol, ask, 0, ask + InpTranche1TP_Pips * 10 * point, m_active_cluster_id + "-T1");
+      m_trade.Buy(t1_lots, _Symbol, ask, 0, ask + InpTranche1TP_Pips * 10 * point, m_active_cluster_id + "-T1");
    else
-      m_trade.Sell(InpTranche1Lots, _Symbol, bid, 0, bid - InpTranche1TP_Pips * 10 * point, m_active_cluster_id + "-T1");
+      m_trade.Sell(t1_lots, _Symbol, bid, 0, bid - InpTranche1TP_Pips * 10 * point, m_active_cluster_id + "-T1");
 
    // Tranche 2: Core Trend
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 2);
    if(direction == 1)
-      m_trade.Buy(InpTranche2Lots, _Symbol, ask, 0, ask + InpTranche2TP_Pips * 10 * point, m_active_cluster_id + "-T2");
+      m_trade.Buy(t2_lots, _Symbol, ask, 0, ask + InpTranche2TP_Pips * 10 * point, m_active_cluster_id + "-T2");
    else
-      m_trade.Sell(InpTranche2Lots, _Symbol, bid, 0, bid - InpTranche2TP_Pips * 10 * point, m_active_cluster_id + "-T2");
+      m_trade.Sell(t2_lots, _Symbol, bid, 0, bid - InpTranche2TP_Pips * 10 * point, m_active_cluster_id + "-T2");
 
    // Tranche 3: Impulse Runner
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 3);
    if(direction == 1)
-      m_trade.Buy(InpTranche3Lots, _Symbol, ask, 0, ask + InpTranche3TP_Pips * 10 * point, m_active_cluster_id + "-T3");
+      m_trade.Buy(t3_lots, _Symbol, ask, 0, ask + InpTranche3TP_Pips * 10 * point, m_active_cluster_id + "-T3");
    else
-      m_trade.Sell(InpTranche3Lots, _Symbol, bid, 0, bid - InpTranche3TP_Pips * 10 * point, m_active_cluster_id + "-T3");
+      m_trade.Sell(t3_lots, _Symbol, bid, 0, bid - InpTranche3TP_Pips * 10 * point, m_active_cluster_id + "-T3");
 }
 
 //+------------------------------------------------------------------+

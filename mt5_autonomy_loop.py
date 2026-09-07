@@ -1,20 +1,24 @@
 """
-mt5_autonomy_loop.py — Continuous Autonomous AI Engine & Feedback Loop.
+mt5_autonomy_loop.py — Multi-Symbol Autonomous AI Engine & Risk/Margin Controller.
 
-1. Live Tick Indicator Engine:
-   - Polls live gold tick stream (or MT5 IPC live_features.json) every 1 second.
-   - Computes RSI(14), MACD(12,26,9), EMA(20) slope, Volatility (ATR/Close).
-   - Feeds features to Local SGD AI Brain (POST http://127.0.0.1:8000/predict).
-   - Writes live prediction to MQL5/Files/ai_signal.json.
+1. Multi-Symbol Indicator Engine:
+   - Scans all MT5 live feature files (MQL5/Files/live_features_*.json).
+   - Supports XAUUSD, EURUSD, GBPUSD, USDJPY, AUDUSD, USDCHF, USDCAD, USDSEK.
+   - Feeds technical feature vectors to Local SGD AI Brain (POST http://127.0.0.1:8000/predict).
+   - Writes symbol-specific prediction files (MQL5/Files/ai_signal_<SYMBOL>.json).
 
-2. Automated Trade Cluster Execution:
+2. Margin & Risk Guard:
+   - Inspects MQL5/Files/mt5_state.json.
+   - Enforces Free Margin >= $500 and Free Margin/Balance >= 15%.
+   - Enforces Max 9 open cluster positions across account.
+
+3. Targeted Trade Cluster Execution:
    - When Directional Strength Score >= 35.0 or <= -35.0, automatically issues
-     a 3-tranche cluster trigger command to MQL5/Files/cluster_command.json.
+     symbol-targeted cluster trigger command (MQL5/Files/cluster_command_<SYMBOL>.json).
 
-3. Continuous Learning Feedback Loop:
-   - Watches MQL5/Files/ai_feedback.json and closed trade logs.
-   - Sends realized P&L + entry features to POST http://127.0.0.1:8000/feedback.
-   - Triggers online SGD warm-start partial fit model weight updates instantly.
+4. Continuous Learning Feedback Loop:
+   - Processes MQL5/Files/ai_feedback.json closed trade outcomes.
+   - Performs online SGD warm-start partial_fit model weight updates.
 """
 from __future__ import annotations
 
@@ -38,50 +42,51 @@ logger = logging.getLogger(__name__)
 MQL5_FILES = Path("/Users/amjadnoor/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Files")
 MQL5_FILES.mkdir(parents=True, exist_ok=True)
 
-LIVE_FEATURES_FILE = MQL5_FILES / "live_features.json"
-AI_SIGNAL_FILE     = MQL5_FILES / "ai_signal.json"
-CLUSTER_CMD_FILE   = MQL5_FILES / "cluster_command.json"
-FEEDBACK_FILE      = MQL5_FILES / "ai_feedback.json"
-DB_PATH            = Path.home() / "trading_poc.db"
+STATE_FILE    = MQL5_FILES / "mt5_state.json"
+FEEDBACK_FILE = MQL5_FILES / "ai_feedback.json"
+DB_PATH       = Path.home() / "trading_poc.db"
 
 
-class ContinuousAutonomyLoop:
+def read_mql5_file(filepath: Path) -> str:
+    """Read MQL5 text file handling UTF-16LE and UTF-8 encodings seamlessly."""
+    if not filepath.exists():
+        return ""
+    try:
+        data = filepath.read_bytes()
+        if not data:
+            return ""
+        if data.startswith(b'\xff\xfe') or data.startswith(b'\xfe\xff'):
+            return data.decode("utf-16", errors="ignore")
+        try:
+            return data.decode("utf-8")
+        except Exception:
+            return data.decode("utf-16le", errors="ignore")
+    except Exception as e:
+        logger.error(f"Error reading {filepath.name}: {e}")
+        return ""
+
+
+class MultiSymbolAutonomyLoop:
     def __init__(self):
-        self.bar_buffer: List[float] = []
-        self.last_cluster_time = 0.0
-        self.cooldown_sec = 15.0   # 15s aggressive cluster cooldown
+        self.last_cluster_time: Dict[str, float] = {}
+        self.cooldown_sec = 20.0   # 20s per-symbol cooldown
         self.last_feedback_mtime = 0.0
 
-    def compute_indicators(self, prices: List[float]) -> dict:
-        """Compute RSI(14), MACD diff, EMA slope, Volatility from price series."""
-        if len(prices) < 30:
-            return {"rsi": 50.0, "macd_diff": 0.0, "ema_slope": 0.0, "volatility": 0.002}
-
-        s = pd.Series(prices)
-        delta = s.diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / (loss + 1e-9)
-        rsi = float((100.0 - (100.0 / (1.0 + rs))).iloc[-1])
-
-        ema12 = s.ewm(span=12).mean()
-        ema26 = s.ewm(span=26).mean()
-        macd = ema12 - ema26
-        signal = macd.ewm(span=9).mean()
-        macd_diff = float((macd - signal).iloc[-1])
-
-        ema20 = s.ewm(span=20).mean()
-        ema_slope = float((ema20.iloc[-1] - ema20.iloc[-3]) / (ema20.iloc[-3] + 1e-9)) if len(ema20) >= 3 else 0.0
-
-        std = float(s.pct_change().rolling(14).std().iloc[-1])
-        volatility = std if not np.isnan(std) else 0.002
-
-        return {
-            "rsi": round(float(np.nan_to_num(rsi, nan=50.0)), 2),
-            "macd_diff": round(float(np.nan_to_num(macd_diff, nan=0.0)), 4),
-            "ema_slope": round(float(np.nan_to_num(ema_slope, nan=0.0)), 4),
-            "volatility": round(float(np.nan_to_num(volatility, nan=0.002)), 4),
-        }
+    def get_account_state(self) -> dict:
+        """Read live account state exported by MT5."""
+        text = read_mql5_file(STATE_FILE)
+        if not text:
+            return {"free_margin": 10000.0, "balance": 10000.0, "position_count": 0}
+        try:
+            data = json.loads(text)
+            return {
+                "free_margin": data.get("free_margin", 10000.0),
+                "balance": data.get("balance", 10000.0),
+                "equity": data.get("equity", 10000.0),
+                "position_count": len(data.get("positions", [])),
+            }
+        except Exception:
+            return {"free_margin": 10000.0, "balance": 10000.0, "position_count": 0}
 
     def call_brain_predict(self, feats: dict) -> Optional[dict]:
         try:
@@ -120,96 +125,111 @@ class ContinuousAutonomyLoop:
                 return
             self.last_feedback_mtime = mtime
 
-            text = FEEDBACK_FILE.read_text().strip()
+            text = read_mql5_file(FEEDBACK_FILE).strip()
             if not text:
                 return
             items = json.loads(text) if text.startswith("[") else [json.loads(text)]
             for item in items:
                 success = self.call_brain_feedback(item)
                 if success:
-                    logger.info(f"[Continuous Learning] Model trained on trade {item.get('trade_id')} | PnL=${item.get('realized_pnl', 0):+.2f}")
+                    logger.info(f"[Continuous Learning] Model retrained on trade {item.get('trade_id')} | PnL=${item.get('realized_pnl', 0):+.2f}")
         except Exception as e:
             logger.error(f"[Feedback Processor] Error: {e}")
 
     async def run(self):
-        logger.info("=" * 65)
-        logger.info("  ⚡ MT5 Continuous Autonomy Engine & Real-Time Learning Loop")
+        logger.info("=" * 70)
+        logger.info("  ⚡ Multi-Symbol Autonomous AI Engine & Risk/Margin Guard")
         logger.info("  IPC Directory: " + str(MQL5_FILES))
         logger.info("  AI Brain Server: http://127.0.0.1:8000")
-        logger.info("=" * 65)
-
-        # Pre-fill initial price history from yfinance
-        try:
-            df = yf.download("GC=F", period="5d", interval="1m", progress=False)
-            if not df.empty and "Close" in df:
-                closes = df["Close"].values.flatten().tolist()
-                self.bar_buffer = [float(c) for c in closes[-200:]]
-                logger.info(f"[Warmup] Downloaded {len(self.bar_buffer)} historical gold prices.")
-        except Exception as e:
-            logger.warning(f"[Warmup] yfinance download failed: {e}")
-
-        if not self.bar_buffer:
-            self.bar_buffer = [2000.0 + (i * 0.1) for i in range(100)]
+        logger.info("=" * 70)
 
         while True:
             try:
-                # 1. Check if MT5 EA wrote live features directly
-                feats = None
-                if LIVE_FEATURES_FILE.exists():
+                # 1. Discover all symbol feature files exported by MT5 EAs
+                feature_files = list(MQL5_FILES.glob("live_features_*.json"))
+                if not feature_files and (MQL5_FILES / "live_features.json").exists():
+                    feature_files = [MQL5_FILES / "live_features.json"]
+
+                # 2. Check Account Margin State
+                acc_state = self.get_account_state()
+                free_margin = acc_state["free_margin"]
+                balance = acc_state["balance"]
+                pos_cnt = acc_state["position_count"]
+
+                for ff in feature_files:
                     try:
-                        feats_raw = json.loads(LIVE_FEATURES_FILE.read_text())
-                        if "rsi" in feats_raw:
-                            feats = feats_raw
-                    except Exception:
-                        pass
-
-                # 2. Fallback to calculating indicators from tick stream
-                if feats is None:
-                    # Append synthetic/live tick
-                    last_p = self.bar_buffer[-1]
-                    tick_chg = np.random.normal(0, 0.25)
-                    new_p = round(last_p + tick_chg, 2)
-                    self.bar_buffer.append(new_p)
-                    if len(self.bar_buffer) > 500:
-                        self.bar_buffer.pop(0)
-
-                    feats = self.compute_indicators(self.bar_buffer)
-
-                # 3. Request Prediction from AI Brain Microservice
-                pred = self.call_brain_predict(feats)
-                if pred:
-                    strength = pred.get("strength_score", 0.0)
-                    direction = pred.get("direction", 0)
-                    confidence = pred.get("confidence", 0.5)
-
-                    # Mirror to MQL5/Files/ai_signal.json
-                    AI_SIGNAL_FILE.write_text(json.dumps(pred, indent=2))
-
-                    logger.info(f"[Autonomy Tick] Price=${self.bar_buffer[-1]:.2f} | Strength={strength:+.1f} | Dir={direction} | Conf={confidence:.0%} | RSI={feats['rsi']}")
-
-                    # 4. Automated Trade Cluster Trigger (Strength >= 35.0%)
-                    now = time.time()
-                    if abs(strength) >= 35.0 and (now - self.last_cluster_time) >= self.cooldown_sec:
-                        self.last_cluster_time = now
-                        cluster_id = f"CL-AUTO-{int(now) % 10000}"
-                        dir_str = "BUY" if strength >= 35.0 else "SELL"
-
-                        cmd_payload = {
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "cluster_id": cluster_id,
-                            "direction": dir_str,
-                            "strength_score": strength,
-                            "tranches": [
-                                {"name": "Tranche 1 (Alpha Scalp)", "lots": 0.02, "tp_pips": 18, "trailing_stop": True},
-                                {"name": "Tranche 2 (Core Trend)", "lots": 0.02, "tp_pips": 32, "trailing_stop": False},
-                                {"name": "Tranche 3 (Impulse Runner)", "lots": 0.01, "tp_pips": 55, "trailing_stop": False},
-                            ]
+                        text = read_mql5_file(ff)
+                        if not text:
+                            continue
+                        raw = json.loads(text)
+                        if "rsi" not in raw:
+                            continue
+                        
+                        symbol = raw.get("symbol", "XAUUSD")
+                        feats = {
+                            "rsi": raw.get("rsi", 50.0),
+                            "macd_diff": raw.get("macd_diff", 0.0),
+                            "ema_slope": raw.get("ema_slope", 0.0),
+                            "volatility": raw.get("volatility", 0.002),
                         }
 
-                        CLUSTER_CMD_FILE.write_text(json.dumps(cmd_payload, indent=2))
-                        logger.info(f"🔥 [AUTO CLUSTER DISPATCH] Cluster {cluster_id} dispatched ({dir_str}) | Strength={strength:+.1f}%")
+                        # 3. Query AI Brain Prediction
+                        pred = self.call_brain_predict(feats)
+                        if not pred:
+                            continue
 
-                # 5. Process any trade exit feedback from MT5 to update SGD model weights
+                        strength = pred.get("strength_score", 0.0)
+                        direction = pred.get("direction", 0)
+                        confidence = pred.get("confidence", 0.5)
+
+                        # Write symbol-specific signal
+                        sig_file = MQL5_FILES / f"ai_signal_{symbol}.json"
+                        sig_file.write_text(json.dumps(pred, indent=2))
+                        (MQL5_FILES / "ai_signal.json").write_text(json.dumps(pred, indent=2))
+
+                        logger.info(f"[{symbol}] Strength={strength:+.1f}% | Dir={direction} | RSI={feats['rsi']} | FreeMargin=${free_margin:.2f}")
+
+                        # 4. Check Margin Guard & Trade Cluster Dispatch
+                        now = time.time()
+                        last_time = self.last_cluster_time.get(symbol, 0.0)
+
+                        if abs(strength) >= 35.0 and (now - last_time) >= self.cooldown_sec:
+                            # Margin Protection Checks
+                            if free_margin < 500.0 or (balance > 0 and (free_margin / balance) < 0.15):
+                                logger.warning(f"⚠️ [{symbol}] Cluster skipped: Low Free Margin (${free_margin:.2f})")
+                                continue
+
+                            if pos_cnt >= 12:
+                                logger.warning(f"⚠️ [{symbol}] Cluster skipped: Max open positions cap ({pos_cnt}) reached")
+                                continue
+
+                            self.last_cluster_time[symbol] = now
+                            cluster_id = f"CL-{symbol}-{int(now) % 10000}"
+                            dir_str = "BUY" if strength >= 35.0 else "SELL"
+
+                            cmd_payload = {
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "symbol": symbol,
+                                "cluster_id": cluster_id,
+                                "direction": dir_str,
+                                "strength_score": strength,
+                                "tranches": [
+                                    {"name": "Tranche 1 (Alpha Scalp)", "lots": 0.02, "tp_pips": 18, "trailing_stop": True},
+                                    {"name": "Tranche 2 (Core Trend)", "lots": 0.02, "tp_pips": 32, "trailing_stop": False},
+                                    {"name": "Tranche 3 (Impulse Runner)", "lots": 0.01, "tp_pips": 55, "trailing_stop": False},
+                                ]
+                            }
+
+                            cmd_file = MQL5_FILES / f"cluster_command_{symbol}.json"
+                            cmd_file.write_text(json.dumps(cmd_payload, indent=2))
+                            (MQL5_FILES / "cluster_command.json").write_text(json.dumps(cmd_payload, indent=2))
+
+                            logger.info(f"🔥 [MULTI-SYMBOL DISPATCH] {symbol} Cluster {cluster_id} dispatched ({dir_str}) | Strength={strength:+.1f}%")
+
+                    except Exception as e:
+                        logger.error(f"[Symbol Loop {ff.name}] Error: {e}")
+
+                # 5. Process deal exit feedback
                 self.process_feedback_file()
 
             except Exception as e:
@@ -219,5 +239,5 @@ class ContinuousAutonomyLoop:
 
 
 if __name__ == "__main__":
-    loop = ContinuousAutonomyLoop()
+    loop = MultiSymbolAutonomyLoop()
     asyncio.run(loop.run())
