@@ -56,6 +56,31 @@ double   m_last_ema_slope = 0.0;
 double   m_last_volatility = 0.002;
 double   m_last_adx = 25.0;
 
+// Ticket Deduplication Tracking Array
+ulong    m_processed_tickets[500];
+int      m_processed_count = 0;
+
+bool IsDealProcessed(ulong ticket)
+{
+   for(int i = 0; i < m_processed_count; i++)
+   {
+      if(m_processed_tickets[i] == ticket)
+         return true;
+   }
+   return false;
+}
+
+void MarkDealProcessed(ulong ticket)
+{
+   if(m_processed_count >= 500)
+   {
+      for(int i = 0; i < 499; i++)
+         m_processed_tickets[i] = m_processed_tickets[i+1];
+      m_processed_count = 499;
+   }
+   m_processed_tickets[m_processed_count++] = ticket;
+}
+
 // Technical Indicator Handles
 int      m_h_rsi = INVALID_HANDLE;
 int      m_h_macd = INVALID_HANDLE;
@@ -283,11 +308,11 @@ void CheckClusterCommands()
 }
 
 //+------------------------------------------------------------------+
-//| Check Closed Deals & Send SGD Feedback Payload                   |
+//| Check Closed Deals & Send SGD Feedback Payload (Deduplicated)    |
 //+------------------------------------------------------------------+
 void CheckClosedDealsFeedback()
 {
-   datetime from = TimeCurrent() - 60; // Check last 60 seconds
+   datetime from = TimeCurrent() - 120; // Check last 120 seconds
    if(HistorySelect(from, TimeCurrent()))
    {
       int deals = HistoryDealsTotal();
@@ -301,11 +326,15 @@ void CheckClosedDealsFeedback()
          // If closed deal from cluster EAs
          if(entry_type == DEAL_ENTRY_OUT && magic >= InpBaseMagicNumber && magic <= InpBaseMagicNumber + 10)
          {
+            // CRITICAL DEDUPLICATION FIX: Process each deal ticket EXACTLY ONCE
+            if(IsDealProcessed(deal_ticket)) continue;
+            MarkDealProcessed(deal_ticket);
+
             m_feedback_count++;
             if(profit > 0) m_wins++; else m_losses++;
 
-            string fb_json = StringFormat("{\"trade_id\":\"MT5_%d\",\"direction\":1,\"realized_pnl\":%.2f,\"rsi\":%.2f,\"macd_diff\":%.4f,\"ema_slope\":%.4f,\"volatility\":%.4f}",
-                                          deal_ticket, profit, m_last_rsi, m_last_macd_diff, m_last_ema_slope, m_last_volatility);
+            string fb_json = StringFormat("{\"trade_id\":\"MT5_%d\",\"direction\":1,\"realized_pnl\":%.2f,\"rsi\":%.2f,\"macd_diff\":%.4f,\"ema_slope\":%.4f,\"volatility\":%.4f,\"adx\":%.2f}",
+                                          deal_ticket, profit, m_last_rsi, m_last_macd_diff, m_last_ema_slope, m_last_volatility, m_last_adx);
 
             int handle = FileOpen("ai_feedback.json", FILE_WRITE|FILE_TXT|FILE_COMMON);
             if(handle == INVALID_HANDLE)
@@ -351,6 +380,32 @@ void ParseSignalJson(string json)
 }
 
 //+------------------------------------------------------------------+
+//| Spread & Momentum Safeguards                                     |
+//+------------------------------------------------------------------+
+bool IsSpreadAcceptable()
+{
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   long max_allowed = (StringFind(_Symbol, "XAU") >= 0 || StringFind(_Symbol, "GOLD") >= 0) ? 50 : 25;
+
+   if(spread > max_allowed)
+   {
+      Print(StringFormat("[Spread Safeguard] Rejected entry for %s! High Spread: %d points (Max: %d)", _Symbol, spread, max_allowed));
+      return false;
+   }
+   return true;
+}
+
+bool IsMomentumValid()
+{
+   if(MathAbs(m_last_ema_slope) < 0.0001 && m_last_rsi >= 45.0 && m_last_rsi <= 55.0)
+   {
+      Print(StringFormat("[Momentum Safeguard] Rejected entry for %s! Dead flat market (EMA slope: %.5f, RSI: %.1f)", _Symbol, m_last_ema_slope, m_last_rsi));
+      return false;
+   }
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| Margin & Risk Management Safeguard Check                         |
 //+------------------------------------------------------------------+
 bool IsMarginSafe()
@@ -359,21 +414,25 @@ bool IsMarginSafe()
    double balance      = AccountInfoDouble(ACCOUNT_BALANCE);
    double margin_level = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
 
-   // 1. Min Free Margin Guard ($500 minimum or >= 15% of account balance)
+   // 1. Spread & Momentum Safeguards
+   if(!IsSpreadAcceptable() || !IsMomentumValid())
+      return false;
+
+   // 2. Min Free Margin Guard ($500 minimum or >= 15% of account balance)
    if(free_margin < 500.0 || (balance > 0 && (free_margin / balance) < 0.15))
    {
       Print(StringFormat("[Margin Safeguard] Trade rejected! Low Free Margin: $%.2f (Min required: 15%% of $%.2f)", free_margin, balance));
       return false;
    }
 
-   // 2. Margin Level Guard (Min 200% margin level if margin in use > 0)
+   // 3. Margin Level Guard (Min 200% margin level if margin in use > 0)
    if(margin_level > 0 && margin_level < 200.0)
    {
       Print(StringFormat("[Margin Safeguard] Trade rejected! Low Margin Level: %.1f%% (Min required: 200%%)", margin_level));
       return false;
    }
 
-   // 3. Max Active Cluster Position Cap (Max 9 cluster positions across account)
+   // 4. Max Active Cluster Position Cap (Max 9 cluster positions across account)
    if(GetActiveClusterPositionCount() >= 9)
    {
       Print("[Margin Safeguard] Trade rejected! Max active cluster position cap (9) reached.");
