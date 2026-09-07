@@ -44,7 +44,7 @@ MQL5_FILES.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE    = MQL5_FILES / "mt5_state.json"
 FEEDBACK_FILE = MQL5_FILES / "ai_feedback.json"
-DB_PATH       = Path.home() / "trading_poc.db"
+DB_PATH       = Path("/Users/amjadnoor/trading_poc.db")
 
 
 def read_mql5_file(filepath: Path) -> str:

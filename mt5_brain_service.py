@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DB_PATH = Path.home() / "trading_poc.db"
+DB_PATH = Path("/Users/amjadnoor/trading_poc.db")
 MQL5_FILES = Path("/Users/amjadnoor/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Files")
 MQL5_FILES.mkdir(parents=True, exist_ok=True)
 IPC_SIGNAL_FILE = MQL5_FILES / "ai_signal.json"
@@ -68,6 +68,11 @@ def init_db():
                 learned_label INTEGER NOT NULL
             );
         """)
+        for tbl in ["predictions", "feedback"]:
+            try:
+                conn.execute(f"ALTER TABLE {tbl} ADD COLUMN adx REAL;")
+            except sqlite3.OperationalError:
+                pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS cluster_triggers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
