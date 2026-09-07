@@ -384,6 +384,35 @@ bool IsMarginSafe()
 }
 
 //+------------------------------------------------------------------+
+//| Render Visual On-Chart Trade Setup Boxes & Entry Markers         |
+//+------------------------------------------------------------------+
+void DrawTradeSetupVisuals(int direction, double entry_p, double tp_p, double sl_p)
+{
+   string box_name   = StringFormat("SETUP_BOX_%s_%d", _Symbol, (int)TimeCurrent());
+   string arrow_name = StringFormat("SETUP_ARROW_%s_%d", _Symbol, (int)TimeCurrent());
+
+   datetime t1 = TimeCurrent();
+   datetime t2 = t1 + (PeriodSeconds() * 25);
+
+   // 1. Render Target Risk/Reward Box
+   ObjectCreate(0, box_name, OBJ_RECTANGLE, 0, t1, entry_p, t2, tp_p);
+   color bg_clr = (direction == 1) ? C'34,197,94' : C'239,68,68';
+   ObjectSetInteger(0, box_name, OBJPROP_COLOR, bg_clr);
+   ObjectSetInteger(0, box_name, OBJPROP_BGCOLOR, bg_clr);
+   ObjectSetInteger(0, box_name, OBJPROP_FILL, true);
+   ObjectSetInteger(0, box_name, OBJPROP_BACK, true);
+
+   // 2. Render Entry Signal Arrow
+   int arrow_code = (direction == 1) ? 233 : 234;
+   ObjectCreate(0, arrow_name, OBJ_ARROW, 0, t1, entry_p);
+   ObjectSetInteger(0, arrow_name, OBJPROP_ARROWCODE, arrow_code);
+   ObjectSetInteger(0, arrow_name, OBJPROP_COLOR, bg_clr);
+   ObjectSetInteger(0, arrow_name, OBJPROP_WIDTH, 3);
+
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
 //| Execute 3-Tranche Aggressive Trade Cluster                       |
 //+------------------------------------------------------------------+
 void ExecuteTradeCluster(int direction, string source_tag)
@@ -412,6 +441,10 @@ void ExecuteTradeCluster(int direction, string source_tag)
    Print(StringFormat("[Cluster Execution] Initiating 3-Tranche Cluster %s (%s) on %s | Dir=%s | Strength=%.1f | Lots=%.2f/%.2f/%.2f",
          m_active_cluster_id, source_tag, _Symbol, (direction == 1 ? "BUY" : "SELL"), m_current_strength, t1_lots, t2_lots, t3_lots));
 
+   double entry_p = (direction == 1) ? ask : bid;
+   double tp_p    = (direction == 1) ? (ask + InpTranche2TP_Pips * 10 * point) : (bid - InpTranche2TP_Pips * 10 * point);
+   double sl_p    = (direction == 1) ? (ask - InpTranche1TP_Pips * 10 * point) : (bid + InpTranche1TP_Pips * 10 * point);
+
    // Tranche 1: Alpha Scalp
    m_trade.SetExpertMagicNumber(InpBaseMagicNumber + 1);
    if(direction == 1)
@@ -432,6 +465,9 @@ void ExecuteTradeCluster(int direction, string source_tag)
       m_trade.Buy(t3_lots, _Symbol, ask, 0, ask + InpTranche3TP_Pips * 10 * point, m_active_cluster_id + "-T3");
    else
       m_trade.Sell(t3_lots, _Symbol, bid, 0, bid - InpTranche3TP_Pips * 10 * point, m_active_cluster_id + "-T3");
+
+   // Draw visually informative trade setup graphics on chart
+   DrawTradeSetupVisuals(direction, entry_p, tp_p, sl_p);
 }
 
 //+------------------------------------------------------------------+

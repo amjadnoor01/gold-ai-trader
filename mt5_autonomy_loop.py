@@ -72,6 +72,28 @@ class MultiSymbolAutonomyLoop:
         self.cooldown_sec = 20.0   # 20s per-symbol cooldown
         self.last_feedback_mtime = 0.0
 
+    def get_evolving_parameters(self, symbol: str) -> tuple[float, float]:
+        """Dynamically compute evolved trigger threshold and lot multiplier based on rolling win rate."""
+        try:
+            with sqlite3.connect(str(DB_PATH), timeout=5.0) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT learned_label FROM feedback ORDER BY id DESC LIMIT 20")
+                rows = cur.fetchall()
+                if not rows or len(rows) < 5:
+                    return 35.0, 1.0
+                
+                wins = sum(1 for r in rows if r[0] == 1)
+                win_rate = wins / len(rows)
+                
+                if win_rate >= 0.65:
+                    return 30.0, 1.25   # Aggressive mode
+                elif win_rate <= 0.45:
+                    return 42.0, 0.75   # Capital Protection mode
+                else:
+                    return 35.0, 1.0
+        except Exception:
+            return 35.0, 1.0
+
     def get_account_state(self) -> dict:
         """Read live account state exported by MT5."""
         text = read_mql5_file(STATE_FILE)
@@ -189,11 +211,14 @@ class MultiSymbolAutonomyLoop:
 
                         logger.info(f"[{symbol}] Strength={strength:+.1f}% | Dir={direction} | RSI={feats['rsi']} | FreeMargin=${free_margin:.2f}")
 
+                        # Get self-evolving dynamic threshold and lot multiplier
+                        dyn_thresh, lot_mult = self.get_evolving_parameters(symbol)
+
                         # 4. Check Margin Guard & Trade Cluster Dispatch
                         now = time.time()
                         last_time = self.last_cluster_time.get(symbol, 0.0)
 
-                        if abs(strength) >= 35.0 and (now - last_time) >= self.cooldown_sec:
+                        if abs(strength) >= dyn_thresh and (now - last_time) >= self.cooldown_sec:
                             # Margin Protection Checks
                             if free_margin < 500.0 or (balance > 0 and (free_margin / balance) < 0.15):
                                 logger.warning(f"⚠️ [{symbol}] Cluster skipped: Low Free Margin (${free_margin:.2f})")
@@ -205,7 +230,7 @@ class MultiSymbolAutonomyLoop:
 
                             self.last_cluster_time[symbol] = now
                             cluster_id = f"CL-{symbol}-{int(now) % 10000}"
-                            dir_str = "BUY" if strength >= 35.0 else "SELL"
+                            dir_str = "BUY" if strength >= dyn_thresh else "SELL"
 
                             cmd_payload = {
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -214,9 +239,9 @@ class MultiSymbolAutonomyLoop:
                                 "direction": dir_str,
                                 "strength_score": strength,
                                 "tranches": [
-                                    {"name": "Tranche 1 (Alpha Scalp)", "lots": 0.02, "tp_pips": 18, "trailing_stop": True},
-                                    {"name": "Tranche 2 (Core Trend)", "lots": 0.02, "tp_pips": 32, "trailing_stop": False},
-                                    {"name": "Tranche 3 (Impulse Runner)", "lots": 0.01, "tp_pips": 55, "trailing_stop": False},
+                                    {"name": "Tranche 1 (Alpha Scalp)", "lots": round(0.02 * lot_mult, 2), "tp_pips": 18, "trailing_stop": True},
+                                    {"name": "Tranche 2 (Core Trend)", "lots": round(0.02 * lot_mult, 2), "tp_pips": 32, "trailing_stop": False},
+                                    {"name": "Tranche 3 (Impulse Runner)", "lots": round(0.01 * lot_mult, 2), "tp_pips": 55, "trailing_stop": False},
                                 ]
                             }
 
